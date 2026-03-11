@@ -1,0 +1,25 @@
+# Phase 1 — Imaging Pipeline
+torch
+monai
+SimpleITK
+nibabel
+pyradiomics
+numpy
+pandas
+scipy
+scikit-image
+h5py
+langgraph
+langchain-core
+nilearn
+
+# Phase 2 — Agentic Intelligence
+transformers
+weaviate-client
+mcp[cli]
+httpx
+ollama
+
+# Phase 3 — Clinical Interface
+chromadb
+matplotlib
