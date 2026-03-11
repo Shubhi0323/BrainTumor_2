@@ -1,0 +1,80 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: brain-tumor-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  ollama-pull:
+    image: ollama/ollama:latest
+    container_name: brain-tumor-ollama-pull
+    depends_on:
+      ollama:
+        condition: service_healthy
+    entrypoint: ["ollama", "pull", "llama3"]
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    restart: "no"
+
+  weaviate:
+    image: semitechnologies/weaviate:1.28.2
+    container_name: brain-tumor-weaviate
+    ports:
+      - "8080:8080"
+      - "50051:50051"
+    environment:
+      QUERY_DEFAULTS_LIMIT: 25
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
+      PERSISTENCE_DATA_PATH: /var/lib/weaviate
+      DEFAULT_VECTORIZER_MODULE: none
+      CLUSTER_HOSTNAME: node1
+    volumes:
+      - weaviate_data:/var/lib/weaviate
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/v1/.well-known/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: brain-tumor-pipeline
+    depends_on:
+      ollama:
+        condition: service_healthy
+      ollama-pull:
+        condition: service_completed_successfully
+      weaviate:
+        condition: service_healthy
+    environment:
+      - OLLAMA_URL=http://ollama:11434
+      - WEAVIATE_URL=http://weaviate:8080
+    volumes:
+      - ./BraTS2020_training_data:/app/BraTS2020_training_data:ro
+      - ./outputs:/app/outputs
+    entrypoint: ["python", "main.py"]
+    command:
+      - "--data_dir"
+      - "/app/BraTS2020_training_data/content/data"
+      - "--format"
+      - "h5"
+      - "--phase"
+      - "all"
+      - "--output_dir"
+      - "/app/outputs"
+      - "--skip_hitl"
+      - "--max_patients"
+      - "1"
+
+volumes:
+  ollama_data:
+  weaviate_data:
