@@ -63,7 +63,12 @@ def atlas_based_location(mask_arr: np.ndarray) -> list:
     """
     try:
         atlas = datasets.fetch_atlas_harvard_oxford("cort-maxprob-thr25-1mm")
-        atlas_img = nib.load(atlas.maps)
+        atlas_maps = atlas.maps
+        # Newer nilearn returns Nifti1Image directly; older returns a path string
+        if isinstance(atlas_maps, str):
+            atlas_img = nib.load(atlas_maps)
+        else:
+            atlas_img = atlas_maps
         atlas_data = atlas_img.get_fdata().astype(np.int32)
         atlas_labels = atlas.labels
 

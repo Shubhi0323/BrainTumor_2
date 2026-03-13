@@ -12,6 +12,7 @@ h5py
 langgraph
 langchain-core
 nilearn
+nnunetv2
 
 # Phase 2 — Agentic Intelligence
 transformers

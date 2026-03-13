@@ -42,11 +42,14 @@ def check_nnunet_available() -> bool:
     """Check if nnU-Net is installed and pretrained weights are available."""
     try:
         import nnunetv2
-        # Check if model weights exist
+        # Check if model weights actually exist (not just empty dirs)
         model_dir = os.path.join(
             NNUNET_RESULTS, BRATS_DATASET_ID, BRATS_TRAINER + "__nnUNetPlans__" + BRATS_CONFIG
         )
-        if os.path.isdir(model_dir):
+        fold_dir = os.path.join(model_dir, f"fold_{BRATS_FOLDS}")
+        if os.path.isdir(fold_dir) and any(
+            f.endswith('.pth') or f.endswith('.model') for f in os.listdir(fold_dir)
+        ):
             return True
         else:
             print(f"  nnU-Net installed but model weights not found at: {model_dir}")
@@ -58,55 +61,20 @@ def check_nnunet_available() -> bool:
 def download_nnunet_weights():
     """
     Download pretrained nnU-Net weights for BraTS segmentation.
-    Uses the nnU-Net model from Zenodo or MIC-DKFZ repository.
+    
+    NOTE: As of 2024, nnU-Net V2 does NOT ship official pretrained models.
+    The V2 documentation states: "Not yet available for V2".
+    If you have your own trained model, place it at:
+      $nnUNet_results/Dataset137_BraTS2021/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_0/checkpoint_final.pth
+    
+    The pipeline will use ground-truth segmentation masks (available in BraTS
+    training data) as a valid fallback.
     """
-    setup_nnunet_env()
-    model_dir = os.path.join(
-        NNUNET_RESULTS, BRATS_DATASET_ID, BRATS_TRAINER + "__nnUNetPlans__" + BRATS_CONFIG
-    )
-
-    if os.path.isdir(model_dir):
-        print("  nnU-Net weights already downloaded.")
-        return True
-
-    print("  Downloading pretrained nnU-Net BraTS weights...")
-    try:
-        # Install nnU-Net if not present
-        subprocess.run(
-            ["pip", "install", "nnunetv2"],
-            capture_output=True, text=True, check=True
-        )
-
-        # Download pretrained weights using nnU-Net's built-in download
-        # The official way to get pretrained weights:
-        subprocess.run(
-            ["nnUNetv2_download_pretrained_model_by_url",
-             "-url", "https://zenodo.org/records/10782801/files/Dataset137_BraTS2021.zip",
-             "-o", NNUNET_RESULTS],
-            capture_output=True, text=True, timeout=600
-        )
-
-        if os.path.isdir(model_dir):
-            print("  nnU-Net weights downloaded successfully.")
-            return True
-        else:
-            print("  Direct download didn't create expected folder. Trying alternative...")
-            # Alternative: manual download
-            os.makedirs(model_dir, exist_ok=True)
-            subprocess.run([
-                "wget", "-q",
-                "https://zenodo.org/records/10782801/files/Dataset137_BraTS2021.zip",
-                "-O", "/tmp/nnunet_brats.zip"
-            ], capture_output=True, text=True, timeout=600)
-            subprocess.run([
-                "unzip", "-q", "-o", "/tmp/nnunet_brats.zip",
-                "-d", NNUNET_RESULTS
-            ], capture_output=True, text=True)
-            return os.path.isdir(model_dir)
-
-    except Exception as e:
-        print(f"  [WARNING] Failed to download nnU-Net weights: {e}")
-        return False
+    print("  [INFO] nnU-Net V2 does not provide official pretrained models.")
+    print("  [INFO] To use nnU-Net inference, place your own trained weights at:")
+    print(f"         {NNUNET_RESULTS}/{BRATS_DATASET_ID}/{BRATS_TRAINER}__nnUNetPlans__{BRATS_CONFIG}/fold_{BRATS_FOLDS}/checkpoint_final.pth")
+    print("  [INFO] Falling back to ground-truth segmentation masks.")
+    return False
 
 
 def prepare_nnunet_input(base_dir: str, patient_id: str) -> str:

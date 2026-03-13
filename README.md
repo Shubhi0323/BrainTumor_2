@@ -40,7 +40,9 @@ The system processes brain MRI scans through three phases:
 ├── visualization/viewer.py    # 5-panel MRI visualization
 ├── evaluation/                # Dice, Hausdorff, ICC, Precision@K metrics
 ├── utils/h5_adapter.py        # BraTS H5 → 3D volume reconstruction
+├── ui/app.py                  # Streamlit dashboard
 ├── Dockerfile
+├── Dockerfile.ui
 └── docker-compose.yml
 ```
 
@@ -81,6 +83,16 @@ docker compose run --rm pipeline \
   --data_dir /app/BraTS2020_training_data/content/data \
   --format h5 --phase all --output_dir /app/outputs \
   --skip_hitl --max_patients 1 --evaluate
+```
+
+### Launch the Dashboard UI
+
+```bash
+# Start the Streamlit dashboard (accessible at http://localhost:8501)
+docker compose up ui --build
+
+# Or run it alongside the pipeline
+docker compose up --build
 ```
 
 ## Local Setup (without Docker)

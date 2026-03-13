@@ -7,6 +7,7 @@ into a coherent clinical interpretation.
 Falls back to a rule-based summary if Ollama/Llama 3 is unavailable.
 """
 import json
+import os
 
 try:
     import httpx
@@ -14,7 +15,7 @@ try:
 except ImportError:
     HTTPX_AVAILABLE = False
 
-DEFAULT_OLLAMA_URL = "http://localhost:11434"
+DEFAULT_OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 DEFAULT_MODEL = "llama3"
 
 

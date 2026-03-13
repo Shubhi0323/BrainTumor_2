@@ -163,10 +163,28 @@ def process_nifti(data_dir, output_dir, phase, skip_hitl, patient_id=None):
                 process_patient(folder, full_path, output_dir, phase, skip_hitl)
 
 
-def process_h5(data_dir, output_dir, phase, skip_hitl, max_patients=None):
+def process_h5(data_dir, output_dir, phase, skip_hitl, max_patients=None,
+               patient_id=None):
     from utils.h5_adapter import discover_volumes, reconstruct_volume, save_reconstructed_volume
     volumes = discover_volumes(data_dir)
-    vol_ids = sorted(volumes.keys())[:max_patients] if max_patients else sorted(volumes.keys())
+
+    if patient_id:
+        # Extract numeric volume ID from patient_id like "volume_10"
+        import re
+        m = re.match(r'volume_(\d+)', patient_id)
+        if m:
+            target_id = int(m.group(1))
+            if target_id in volumes:
+                vol_ids = [target_id]
+            else:
+                print(f"[ERROR] Patient {patient_id} not found in dataset")
+                return
+        else:
+            print(f"[ERROR] Invalid patient_id format: {patient_id}")
+            return
+    else:
+        vol_ids = sorted(volumes.keys())[:max_patients] if max_patients else sorted(volumes.keys())
+
     for vol_id in vol_ids:
         pid = f"volume_{vol_id}"
         try:
@@ -186,7 +204,7 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir", default="./outputs",
                         help="Output directory")
     parser.add_argument("--patient_id", default=None,
-                        help="Single patient ID (nifti mode)")
+                        help="Single patient ID (e.g. volume_10 for H5, or folder name for NIfTI)")
     parser.add_argument("--format", choices=["nifti", "h5"], default="h5",
                         help="Dataset format")
     parser.add_argument("--phase",
@@ -198,7 +216,7 @@ if __name__ == "__main__":
                         help="Max patients (H5 mode)")
     parser.add_argument("--skip_hitl", action="store_true",
                         help="Auto-approve HITL validation (batch mode)")
-    parser.add_argument("--ollama_url", default="http://localhost:11434",
+    parser.add_argument("--ollama_url", default=os.environ.get("OLLAMA_URL", "http://localhost:11434"),
                         help="Ollama API URL for Llama 3")
     parser.add_argument("--evaluate", action="store_true",
                         help="Run evaluation framework after pipeline")
@@ -209,7 +227,7 @@ if __name__ == "__main__":
 
     if args.format == "h5":
         process_h5(args.data_dir, args.output_dir, args.phase,
-                   args.skip_hitl, args.max_patients)
+                   args.skip_hitl, args.max_patients, args.patient_id)
     else:
         process_nifti(args.data_dir, args.output_dir, args.phase,
                       args.skip_hitl, args.patient_id)

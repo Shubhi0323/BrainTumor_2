@@ -58,9 +58,13 @@ services:
     environment:
       - OLLAMA_URL=http://ollama:11434
       - WEAVIATE_URL=http://weaviate:8080
+      - nnUNet_results=/workspace/nnUNet_results
+      - nnUNet_raw=/workspace/nnUNet_raw
+      - nnUNet_preprocessed=/workspace/nnUNet_preprocessed
     volumes:
       - ./BraTS2020_training_data:/app/BraTS2020_training_data:ro
       - ./outputs:/app/outputs
+      - nnunet_weights:/workspace/nnUNet_results
     entrypoint: ["python", "main.py"]
     command:
       - "--data_dir"
@@ -75,6 +79,27 @@ services:
       - "--max_patients"
       - "1"
 
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile.ui
+    container_name: brain-tumor-ui
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./outputs:/app/outputs
+      - ./BraTS2020_training_data:/app/BraTS2020_training_data:ro
+      - nnunet_weights:/workspace/nnUNet_results
+    environment:
+      - OUTPUT_DIR=/app/outputs
+      - DATA_DIR=/app/BraTS2020_training_data/content/data
+      - OLLAMA_URL=http://ollama:11434
+      - WEAVIATE_URL=http://weaviate:8080
+      - nnUNet_results=/workspace/nnUNet_results
+      - nnUNet_raw=/workspace/nnUNet_raw
+      - nnUNet_preprocessed=/workspace/nnUNet_preprocessed
+
 volumes:
   ollama_data:
   weaviate_data:
+  nnunet_weights:
