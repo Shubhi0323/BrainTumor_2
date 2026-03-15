@@ -61,6 +61,8 @@ services:
       - ./outputs:/app/outputs
       - ./BraTS2020_training_data:/app/BraTS2020_training_data:ro
       - dynunet_weights:/workspace/dynunet_weights
+      - model_cache:/root/.cache
+      - nilearn_data:/root/nilearn_data
     environment:
       - OUTPUT_DIR=/app/outputs
       - DATA_DIR=/app/BraTS2020_training_data/content/data
@@ -73,3 +75,5 @@ volumes:
   ollama_data:
   weaviate_data:
   dynunet_weights:
+  model_cache:
+  nilearn_data:
