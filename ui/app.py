@@ -325,7 +325,7 @@ with st.sidebar:
         else:
             labels.append(f"⬚ {pid}")
 
-    selected_label = st.selectbox("Select Patient", labels, index=0)
+    selected_label = st.selectbox("Select Patient", labels, key="patient_selector")
     patient_id = selected_label.split(" ", 1)[1]  # strip emoji prefix
 
     running_count = sum(1 for j in get_all_jobs() if j.get("status") == "running")
