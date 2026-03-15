@@ -13,11 +13,10 @@ RUN pip install --no-cache-dir streamlit -r requirements.txt
 
 COPY . .
 
-RUN mkdir -p /app/outputs /workspace/nnUNet_results /workspace/nnUNet_raw /workspace/nnUNet_preprocessed
+RUN mkdir -p /app/outputs /workspace/dynunet_weights
 
-ENV nnUNet_results=/workspace/nnUNet_results
-ENV nnUNet_raw=/workspace/nnUNet_raw
-ENV nnUNet_preprocessed=/workspace/nnUNet_preprocessed
+ENV DYNUNET_WEIGHTS_DIR=/workspace/dynunet_weights
+ENV DYNUNET_WEIGHTS_FILE=model_brats_mri_segmentation.pt
 ENV MPLBACKEND=Agg
 
 EXPOSE 8501

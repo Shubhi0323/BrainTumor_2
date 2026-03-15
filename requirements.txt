@@ -12,7 +12,7 @@ h5py
 langgraph
 langchain-core
 nilearn
-nnunetv2
+# DynUNet is provided by monai (already listed above)
 
 # Phase 2 — Agentic Intelligence
 transformers

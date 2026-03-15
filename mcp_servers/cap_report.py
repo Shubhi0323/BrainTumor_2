@@ -48,7 +48,7 @@ def generate_cap_report(state: dict) -> dict:
     # ── Section 2: MRI Study Information ──
     section_study = {
         "modalities": ["T1", "T1CE", "T2", "FLAIR"],
-        "segmentation_method": "nnU-Net (pretrained) / Ground-truth fallback",
+        "segmentation_method": "DynUNet (MONAI) / Ground-truth fallback",
         "preprocessing": [
             "N4 Bias Field Correction",
             "Skull Stripping",

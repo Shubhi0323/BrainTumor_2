@@ -27,12 +27,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Create output directories
-RUN mkdir -p /app/outputs /workspace/nnUNet_results /workspace/nnUNet_raw /workspace/nnUNet_preprocessed
+RUN mkdir -p /app/outputs /workspace/dynunet_weights
 
-# nnU-Net environment
-ENV nnUNet_results=/workspace/nnUNet_results
-ENV nnUNet_raw=/workspace/nnUNet_raw
-ENV nnUNet_preprocessed=/workspace/nnUNet_preprocessed
+# DynUNet weights location
+ENV DYNUNET_WEIGHTS_DIR=/workspace/dynunet_weights
+ENV DYNUNET_WEIGHTS_FILE=model_brats_mri_segmentation.pt
 
 # Ollama URL (points to the Ollama service in Docker Compose)
 ENV OLLAMA_URL=http://ollama:11434

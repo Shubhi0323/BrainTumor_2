@@ -1,6 +1,6 @@
 # Brain Tumor Clinical Decision Support Pipeline
 
-An end-to-end agentic pipeline for brain tumor MRI analysis, clinical reasoning, and structured report generation. Built with LangGraph, nnU-Net, BioClinicalBERT, and Llama 3.
+An end-to-end agentic pipeline for brain tumor MRI analysis, clinical reasoning, and structured report generation. Built with LangGraph, MONAI DynUNet, BioClinicalBERT, and Llama 3.
 
 ## Overview
 
@@ -8,7 +8,7 @@ The system processes brain MRI scans through three phases:
 
 | Phase | Purpose | Components |
 |-------|---------|------------|
-| **Phase 1** — Imaging | MRI preprocessing, tumor segmentation, radiomics feature extraction, brain region mapping | nnU-Net, PyRadiomics, Harvard-Oxford Atlas |
+| **Phase 1** — Imaging | MRI preprocessing, tumor segmentation, radiomics feature extraction, brain region mapping | MONAI DynUNet, PyRadiomics, Harvard-Oxford Atlas |
 | **Phase 2** — Intelligence | Tumor classification, similar case retrieval, AI clinical reasoning, report generation | WHO CNS5, RANO criteria, BioClinicalBERT, Llama 3 |
 | **Phase 3** — Clinical | Patient memory, physician review, structured CAP report, visualization | ChromaDB, HITL validation, matplotlib |
 
@@ -19,7 +19,7 @@ The system processes brain MRI scans through three phases:
 ├── pipeline/graph.py          # LangGraph DAG for Phase 1
 ├── agents/orchestrator.py     # LangGraph DAG for Phase 2 & 3
 ├── preprocessing/mri_prep.py  # N4 bias correction, skull stripping, normalization
-├── segmentation/nnunet_infer.py  # nnU-Net inference + GT fallback
+├── segmentation/dynunet_infer.py  # MONAI DynUNet inference + GT fallback
 ├── radiomics/feature_extractor.py  # PyRadiomics + manual fallback
 ├── clinical_features/
 │   ├── location_mapper.py     # Atlas-based brain region mapping
@@ -180,7 +180,7 @@ outputs/
 
 | Model | Purpose | Source | Fallback |
 |-------|---------|--------|----------|
-| nnU-Net (BraTS2021) | Tumor segmentation | Zenodo (auto-downloaded) | Ground-truth BraTS mask |
+| DynUNet (MONAI) | Tumor segmentation | Pretrained weights (user-provided) | Ground-truth BraTS mask |
 | BioClinicalBERT | Clinical text embeddings | HuggingFace | Manual feature vector |
 | Llama 3 | Clinical reasoning | Ollama (local) | Rule-based text generation |
 | Harvard-Oxford Atlas | Brain region mapping | nilearn | Heuristic geometry |

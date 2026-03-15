@@ -43,7 +43,7 @@ def start_pipeline_job(patient_id):
     log_path = os.path.join(JOBS_DIR, f"{patient_id}.log")
     set_job_status(patient_id, "running", started_at=datetime.now().isoformat(), log_file=log_path)
     with open(log_path, "w") as log_file:
-        subprocess.Popen(
+        proc = subprocess.Popen(
             [
                 "python", "/app/main.py",
                 "--data_dir", DATA_DIR,
@@ -55,6 +55,21 @@ def start_pipeline_job(patient_id):
             ],
             stdout=log_file, stderr=subprocess.STDOUT,
         )
+    # Store PID for process liveness checking
+    set_job_status(patient_id, "running",
+                   started_at=datetime.now().isoformat(),
+                   log_file=log_path, pid=proc.pid)
+
+
+def _is_pid_alive(pid):
+    """Check if a process with given PID is still running."""
+    if pid is None:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
 
 
 def check_running_jobs():
@@ -62,33 +77,60 @@ def check_running_jobs():
     for f in glob.glob(os.path.join(JOBS_DIR, "*.json")):
         with open(f) as fh:
             job = json.load(fh)
-        if job.get("status") != "running":
-            continue
-        pid = job["patient_id"]
-        report_path = os.path.join(OUTPUT_DIR, "reports", f"{pid}_report.json")
+        status = job.get("status", "")
+        pid_val = job.get("patient_id", "")
         log_path = job.get("log_file", "")
+        proc_pid = job.get("pid")
+        report_path = os.path.join(OUTPUT_DIR, "reports", f"{pid_val}_report.json")
+
+        # Recovery: if status is "failed" but report now exists, fix the status
+        if status == "failed" and os.path.exists(report_path):
+            report = load_json(report_path)
+            has_errors = report.get("report_metadata", {}).get("has_errors", False) if report else False
+            errors = report.get("pipeline_errors", []) if report else []
+            if has_errors or errors:
+                set_job_status(pid_val, "completed_with_errors",
+                               started_at=job.get("started_at"),
+                               finished_at=datetime.now().isoformat(),
+                               log_file=log_path, errors=errors)
+            else:
+                set_job_status(pid_val, "completed",
+                               started_at=job.get("started_at"),
+                               finished_at=datetime.now().isoformat(),
+                               log_file=log_path)
+            continue
+
+        if status != "running":
+            continue
+
         # Check if report was generated (pipeline completed)
         if os.path.exists(report_path):
             report = load_json(report_path)
             has_errors = report.get("report_metadata", {}).get("has_errors", False) if report else False
             errors = report.get("pipeline_errors", []) if report else []
             if has_errors or errors:
-                set_job_status(pid, "completed_with_errors",
+                set_job_status(pid_val, "completed_with_errors",
                                started_at=job.get("started_at"),
                                finished_at=datetime.now().isoformat(),
                                log_file=log_path,
                                errors=errors)
             else:
-                set_job_status(pid, "completed",
+                set_job_status(pid_val, "completed",
                                started_at=job.get("started_at"),
                                finished_at=datetime.now().isoformat(),
                                log_file=log_path)
+        elif proc_pid and not _is_pid_alive(proc_pid):
+            # Process exited without producing a report = failed
+            set_job_status(pid_val, "failed",
+                           started_at=job.get("started_at"),
+                           finished_at=datetime.now().isoformat(),
+                           log_file=log_path)
         elif log_path and os.path.exists(log_path):
-            # Check if process is still writing to log (active in last 30s)
+            # Fallback: check log staleness (no PID available)
             mtime = os.path.getmtime(log_path)
-            if time.time() - mtime > 120:
-                # Log hasn't been updated in 2 min — likely failed
-                set_job_status(pid, "failed",
+            if time.time() - mtime > 600:
+                # Log hasn't been updated in 10 min — likely failed
+                set_job_status(pid_val, "failed",
                                started_at=job.get("started_at"),
                                finished_at=datetime.now().isoformat(),
                                log_file=log_path)
@@ -300,6 +342,22 @@ with st.sidebar:
         st.info("⏳ Pipeline is running...")
         if st.button("🔄 Refresh", use_container_width=True):
             st.rerun()
+    elif job_status == "failed" and not patient_processed:
+        st.error("Pipeline failed")
+        log_path = job.get("log_file", "") if job else ""
+        if log_path:
+            local_log = log_path.replace("/app/outputs", OUTPUT_DIR)
+            if os.path.exists(local_log):
+                with open(local_log) as lf:
+                    lines = lf.readlines()
+                last_lines = "".join(lines[-10:]) if lines else "No log output"
+                with st.expander("Last log lines"):
+                    st.code(last_lines, language="text")
+        if st.button("🔄 Retry Pipeline", type="primary", use_container_width=True):
+            start_pipeline_job(patient_id)
+            st.success("Pipeline restarted!")
+            time.sleep(1)
+            st.rerun()
     elif not patient_processed:
         st.warning("Not yet processed")
         if st.button("🚀 Run Pipeline", type="primary", use_container_width=True):
@@ -359,17 +417,22 @@ if section == "Overview":
         rano = report.get("rano_assessment", {})
 
         # Top metrics row
+        vol = morph.get('tumor_volume', 'N/A')
+        vol_str = f"{vol:,} mm³" if isinstance(vol, (int, float)) else f"{vol} mm³"
         cols = st.columns(5)
         with cols[0]:
-            st.markdown(metric_card("Volume", f"{morph.get('tumor_volume', 'N/A'):,} mm³"), unsafe_allow_html=True)
+            st.markdown(metric_card("Volume", vol_str), unsafe_allow_html=True)
         with cols[1]:
-            st.markdown(metric_card("Max Diameter", f"{morph.get('max_diameter', 0):.1f} mm"), unsafe_allow_html=True)
+            diam = morph.get('max_diameter', 0)
+            st.markdown(metric_card("Max Diameter", f"{float(diam):.1f} mm" if isinstance(diam, (int, float)) else str(diam)), unsafe_allow_html=True)
         with cols[2]:
-            st.markdown(metric_card("Sphericity", f"{morph.get('sphericity', 0):.3f}"), unsafe_allow_html=True)
+            sph = morph.get('sphericity', 0)
+            st.markdown(metric_card("Sphericity", f"{float(sph):.3f}" if isinstance(sph, (int, float)) else str(sph)), unsafe_allow_html=True)
         with cols[3]:
             st.markdown(metric_card("WHO Grade", who.get("who_grade", "N/A")), unsafe_allow_html=True)
         with cols[4]:
-            st.markdown(metric_card("Confidence", f"{who.get('confidence', 0):.0%}"), unsafe_allow_html=True)
+            conf = who.get('confidence', 0)
+            st.markdown(metric_card("Confidence", f"{float(conf):.0%}" if isinstance(conf, (int, float)) else str(conf)), unsafe_allow_html=True)
 
         st.markdown("")
 

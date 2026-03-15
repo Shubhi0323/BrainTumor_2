@@ -135,12 +135,21 @@ def save_reconstructed_volume(image_volume: np.ndarray, mask_volume: np.ndarray,
     if image_volume is not None:
         # If image has multiple channels, split them
         if image_volume.ndim == 4:
-            # Shape: (D, C, H, W) — split channels
+            # Detect channel dimension: channels are the smallest spatial dim
+            # H5 BraTS data is (D, H, W, C) with C=4 modalities
+            if image_volume.shape[-1] <= 4:
+                # Channels-last: (D, H, W, C)
+                num_channels = image_volume.shape[-1]
+                get_channel = lambda vol, idx: vol[:, :, :, idx]
+            else:
+                # Channels-first: (D, C, H, W)
+                num_channels = image_volume.shape[1]
+                get_channel = lambda vol, idx: vol[:, idx, :, :]
+
             modality_names = ['t1', 't1ce', 't2', 'flair']
-            num_channels = image_volume.shape[1]
             for ch_idx in range(num_channels):
                 ch_name = modality_names[ch_idx] if ch_idx < len(modality_names) else f'ch{ch_idx}'
-                ch_data = image_volume[:, ch_idx, :, :]
+                ch_data = get_channel(image_volume, ch_idx)
                 img_sitk = sitk.GetImageFromArray(ch_data.astype(np.float32))
                 path = os.path.join(patient_dir, f"{patient_id}_{ch_name}.nii.gz")
                 sitk.WriteImage(img_sitk, path)
@@ -156,8 +165,14 @@ def save_reconstructed_volume(image_volume: np.ndarray, mask_volume: np.ndarray,
         if mask_volume.ndim == 3:
             mask_sitk = sitk.GetImageFromArray(mask_volume.astype(np.int32))
         elif mask_volume.ndim == 4:
-            # Take first channel or max across channels for binary
-            mask_2d = mask_volume[:, 0, :, :] if mask_volume.shape[1] == 1 else np.max(mask_volume, axis=1)
+            # Multi-channel mask: combine across channels
+            # Detect channel dim: channels-last (D,H,W,C) vs channels-first (D,C,H,W)
+            if mask_volume.shape[-1] <= 4:
+                # Channels-last: (D, H, W, C) — max across last dim
+                mask_2d = np.max(mask_volume, axis=-1)
+            else:
+                # Channels-first: (D, C, H, W) — max across dim 1
+                mask_2d = mask_volume[:, 0, :, :] if mask_volume.shape[1] == 1 else np.max(mask_volume, axis=1)
             mask_sitk = sitk.GetImageFromArray(mask_2d.astype(np.int32))
         else:
             mask_sitk = sitk.GetImageFromArray(mask_volume.astype(np.int32))
