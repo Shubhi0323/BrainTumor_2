@@ -1,10 +1,4 @@
-FROM nvidia/cuda:12.1.1-runtime-ubuntu22.04
-
-# Install Python 3.11
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.11 python3.11-venv python3-pip \
-    && ln -sf /usr/bin/python3.11 /usr/bin/python \
-    && rm -rf /var/lib/apt/lists/*
+FROM python:3.11-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential gcc g++ libgl1 libglib2.0-0 libhdf5-dev git curl wget unzip \

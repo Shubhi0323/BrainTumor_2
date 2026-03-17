@@ -42,10 +42,11 @@ def start_pipeline_job(patient_id):
     """Launch pipeline as a background process."""
     log_path = os.path.join(JOBS_DIR, f"{patient_id}.log")
     set_job_status(patient_id, "running", started_at=datetime.now().isoformat(), log_file=log_path)
+    main_py = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "main.py")
     with open(log_path, "w") as log_file:
         proc = subprocess.Popen(
             [
-                "python", "/app/main.py",
+                "python", main_py,
                 "--data_dir", DATA_DIR,
                 "--format", "h5",
                 "--phase", "all",
