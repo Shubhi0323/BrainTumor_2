@@ -6,6 +6,13 @@ services:
       - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 10s
@@ -70,6 +77,13 @@ services:
       - WEAVIATE_URL=http://weaviate:8080
       - DYNUNET_WEIGHTS_DIR=/workspace/dynunet_weights
       - DYNUNET_WEIGHTS_FILE=model_brats_mri_segmentation.pt
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
 
 volumes:
   ollama_data:
