@@ -8,7 +8,7 @@ cd "$REPO_DIR"
 
 echo "=== Installing system dependencies ==="
 apt-get update && apt-get install -y --no-install-recommends \
-    build-essential gcc g++ libgl1 libglib2.0-0 libhdf5-dev curl wget unzip
+    build-essential gcc g++ libgl1 libglib2.0-0 libhdf5-dev curl wget unzip zstd
 
 echo "=== Installing Python dependencies ==="
 pip install --no-cache-dir numpy
