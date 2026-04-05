@@ -13,6 +13,7 @@ apt-get update && apt-get install -y --no-install-recommends \
 echo "=== Installing Python dependencies ==="
 pip install --no-cache-dir numpy
 pip install --no-cache-dir --ignore-installed blinker
+pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu121
 pip install --no-cache-dir streamlit -r requirements.txt
 
 echo "=== Installing & starting Ollama ==="

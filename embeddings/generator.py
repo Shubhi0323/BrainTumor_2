@@ -32,6 +32,9 @@ def _load_model():
         _tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
         _model = AutoModel.from_pretrained(MODEL_NAME)
         _model.eval()
+        if torch.cuda.is_available():
+            _model = _model.to("cuda")
+            print("  BioClinicalBERT loaded on GPU")
     return _tokenizer, _model
 
 
@@ -100,11 +103,14 @@ def generate_embedding(text: str) -> np.ndarray:
         padding=True,
     )
 
+    device = next(model.parameters()).device
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+
     outputs = model(**inputs)
 
     # Use [CLS] token embedding as the sentence representation
     cls_embedding = outputs.last_hidden_state[:, 0, :].squeeze(0)
-    return cls_embedding.numpy()
+    return cls_embedding.cpu().numpy()
 
 
 def generate_embedding_fallback(profile: dict) -> np.ndarray:

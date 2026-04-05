@@ -9,6 +9,7 @@ WORKDIR /app
 RUN pip install --no-cache-dir numpy
 
 COPY requirements.txt .
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch
 RUN pip install --no-cache-dir streamlit -r requirements.txt
 
 COPY . .
