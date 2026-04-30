@@ -30,7 +30,9 @@ def _load_model():
     if _tokenizer is None:
         print(f"  Loading {MODEL_NAME}...")
         _tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-        _model = AutoModel.from_pretrained(MODEL_NAME)
+        # Prefer safetensors to avoid torch.load-based checkpoint loading on
+        # restricted runtimes with older torch versions.
+        _model = AutoModel.from_pretrained(MODEL_NAME, use_safetensors=True)
         _model.eval()
         if torch.cuda.is_available():
             _model = _model.to("cuda")
@@ -174,7 +176,15 @@ def run_embedding_generation(state: dict) -> dict:
             print("  Using BioClinicalBERT for embedding generation.")
             text = clinical_profile_to_text(clinical_profile)
             print(f"  Clinical text ({len(text)} chars): {text[:120]}...")
-            embedding = generate_embedding(text)
+            try:
+                embedding = generate_embedding(text)
+            except Exception as model_err:
+                # Graceful fallback when hosted runtimes block torch.load-based
+                # model loading due security/version constraints.
+                print(f"  [WARNING] Transformer embedding unavailable: {model_err}")
+                print("  Falling back to deterministic clinical feature vector.")
+                embedding = generate_embedding_fallback(clinical_profile)
+                errors.append(f"Embedding model fallback used for {patient_id}")
         else:
             print("  Transformers not available. Using fallback feature vector.")
             embedding = generate_embedding_fallback(clinical_profile)
