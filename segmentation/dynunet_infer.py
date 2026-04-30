@@ -2,12 +2,11 @@
 Tumor Segmentation Node — SegResNet (MONAI)
 =============================================
 Uses MONAI's SegResNet architecture with official pretrained weights from
-the MONAI Model Zoo (brats_mri_segmentation bundle) for BraTS brain tumor
-segmentation.
+the MONAI Model Zoo for multi-modal brain MRI segmentation.
 
 Falls back to ground-truth masks if model weights are not available.
 
-BraTS seg labels:
+Common segmentation labels:
   0 = background
   1 = necrotic / non-enhancing tumor core (NCR/NET)
   2 = peritumoral edema (ED)
@@ -37,8 +36,7 @@ from monai.transforms import (
     AsDiscreted,
 )
 
-# --- SegResNet BraTS Architecture Config ---
-# Matches the official MONAI Model Zoo brats_mri_segmentation bundle
+# --- SegResNet architecture config ---
 IN_CHANNELS = 4      # T1, T1CE, T2, FLAIR
 OUT_CHANNELS = 3     # TC (tumor core), WT (whole tumor), ET (enhancing tumor)
 BLOCKS_DOWN = [1, 2, 2, 4]
@@ -53,17 +51,14 @@ OVERLAP = 0.5
 
 # Default path for pretrained weights
 WEIGHTS_DIR = os.environ.get("DYNUNET_WEIGHTS_DIR", "weights")
-WEIGHTS_FILE = os.environ.get("DYNUNET_WEIGHTS_FILE", "model_brats_mri_segmentation.pt")
+WEIGHTS_FILE = os.environ.get("DYNUNET_WEIGHTS_FILE", "model_mri_segmentation.pt")
 
-# Official MONAI Model Zoo weights URL
-MONAI_BRATS_WEIGHTS_URL = (
-    "https://developer.download.nvidia.com/assets/Clara/monai/tutorials/"
-    "model_zoo/model_brats_mri_segmentation.pt"
-)
+# Optional pretrained weights URL (set via env when needed)
+PRETRAINED_WEIGHTS_URL = os.environ.get("DYNUNET_WEIGHTS_URL", "")
 
 
 def build_segresnet_model() -> SegResNet:
-    """Build SegResNet model with BraTS architecture configuration."""
+    """Build SegResNet model with the configured architecture."""
     model = SegResNet(
         blocks_down=BLOCKS_DOWN,
         blocks_up=BLOCKS_UP,
@@ -80,18 +75,13 @@ def find_weights_path() -> str | None:
     Locate pretrained SegResNet weights.
     Searches in order:
       1. $DYNUNET_WEIGHTS_DIR/$DYNUNET_WEIGHTS_FILE (env-configurable)
-      2. $DYNUNET_WEIGHTS_DIR/model_brats_mri_segmentation.pt (MONAI bundle name)
-      3. weights/ directory relative to this file
-      4. ~/.monai/ user-level cache
+            2. weights/ directory relative to this file
+            3. ~/.monai/ user-level cache
     """
-    monai_name = "model_brats_mri_segmentation.pt"
     candidates = [
         os.path.join(WEIGHTS_DIR, WEIGHTS_FILE),
-        os.path.join(WEIGHTS_DIR, monai_name),
         os.path.join(os.path.dirname(__file__), "..", "weights", WEIGHTS_FILE),
-        os.path.join(os.path.dirname(__file__), "..", "weights", monai_name),
         os.path.join(os.path.expanduser("~"), ".monai", WEIGHTS_FILE),
-        os.path.join(os.path.expanduser("~"), ".monai", monai_name),
     ]
     for path in candidates:
         path = os.path.abspath(path)
@@ -102,12 +92,16 @@ def find_weights_path() -> str | None:
 
 def download_weights() -> str | None:
     """
-    Download official MONAI BraTS SegResNet pretrained weights.
+    Download pretrained SegResNet weights from DYNUNET_WEIGHTS_URL.
     Returns the path to the downloaded file, or None on failure.
     """
+    if not PRETRAINED_WEIGHTS_URL:
+        print("  [INFO] DYNUNET_WEIGHTS_URL is not set; skipping weight download.")
+        return None
+
     dest_dir = os.path.abspath(WEIGHTS_DIR)
     os.makedirs(dest_dir, exist_ok=True)
-    dest_path = os.path.join(dest_dir, "model_brats_mri_segmentation.pt")
+    dest_path = os.path.join(dest_dir, WEIGHTS_FILE)
 
     if os.path.isfile(dest_path):
         file_size = os.path.getsize(dest_path)
@@ -117,13 +111,13 @@ def download_weights() -> str | None:
         else:
             os.remove(dest_path)  # Remove corrupt/partial file
 
-    print("  Downloading MONAI BraTS SegResNet weights...")
-    print(f"  URL: {MONAI_BRATS_WEIGHTS_URL}")
+    print("  Downloading SegResNet weights...")
+    print(f"  URL: {PRETRAINED_WEIGHTS_URL}")
     print(f"  Destination: {dest_path}")
 
     try:
         result = subprocess.run(
-            ["wget", "-q", "--show-progress", "-O", dest_path, MONAI_BRATS_WEIGHTS_URL],
+            ["wget", "-q", "--show-progress", "-O", dest_path, PRETRAINED_WEIGHTS_URL],
             capture_output=True, text=True, timeout=600,
         )
         if result.returncode == 0 and os.path.isfile(dest_path):
@@ -139,7 +133,7 @@ def download_weights() -> str | None:
     try:
         print("  Trying Python urllib fallback...")
         import urllib.request
-        urllib.request.urlretrieve(MONAI_BRATS_WEIGHTS_URL, dest_path)
+        urllib.request.urlretrieve(PRETRAINED_WEIGHTS_URL, dest_path)
         if os.path.isfile(dest_path) and os.path.getsize(dest_path) > 1_000_000:
             print(f"  Download complete: {os.path.getsize(dest_path) / 1e6:.1f} MB")
             return dest_path
@@ -196,7 +190,7 @@ def load_model_with_weights(device: torch.device) -> SegResNet | None:
 
 
 def build_preprocessing_transforms(keys: list[str]):
-    """Build MONAI preprocessing transforms for BraTS MRI modalities."""
+    """Build MONAI preprocessing transforms for multi-modal MRI inputs."""
     return Compose([
         LoadImaged(keys=keys, image_only=True),
         EnsureChannelFirstd(keys=keys),
@@ -210,7 +204,7 @@ def build_preprocessing_transforms(keys: list[str]):
 
 def find_modality_files(base_dir: str) -> dict[str, str] | None:
     """
-    Find BraTS modality files (T1, T1CE, T2, FLAIR) in a patient directory.
+    Find modality files (T1, T1CE, T2, FLAIR) in a patient directory.
     Returns dict mapping modality keys to file paths, or None if not found.
     """
     modality_map: dict[str, str | None] = {"t1": None, "t1ce": None, "t2": None, "flair": None}
@@ -303,17 +297,68 @@ def load_and_binarize_mask(seg_path: str) -> tuple:
     return binary_mask, binary_sitk
 
 
+def heuristic_segmentation_from_preprocessed(
+        preprocessed_path: str,
+        ref_image: sitk.Image | None = None) -> tuple[np.ndarray, sitk.Image] | None:
+    """Create a coarse tumor mask from high-intensity voxels as last-resort fallback."""
+    if not preprocessed_path or not os.path.exists(preprocessed_path):
+        return None
+
+    try:
+        data = np.load(preprocessed_path)
+    except Exception:
+        return None
+
+    if data.ndim != 4 or data.shape[0] == 0:
+        return None
+
+    # Prefer T1CE channel; if unavailable use first channel.
+    channel_idx = 1 if data.shape[0] > 1 else 0
+    vol = data[channel_idx].astype(np.float32)
+    brain = vol != 0
+    if int(np.sum(brain)) < 100:
+        return None
+
+    vals = vol[brain]
+    thr = np.percentile(vals, 99.2)
+    mask = (vol >= thr).astype(np.int32)
+
+    # Remove tiny connected components to reduce false positives.
+    try:
+        from scipy import ndimage
+        labeled, n = ndimage.label(mask)
+        if n > 0:
+            sizes = ndimage.sum(mask, labeled, range(1, n + 1))
+            keep = [i + 1 for i, s in enumerate(sizes) if s >= 250]
+            if keep:
+                mask = np.isin(labeled, keep).astype(np.int32)
+    except Exception:
+        pass
+
+    if int(np.sum(mask > 0)) < 100:
+        return None
+
+    mask_sitk = sitk.GetImageFromArray(mask)
+    if ref_image is not None:
+        mask_sitk.SetOrigin(ref_image.GetOrigin())
+        mask_sitk.SetSpacing(ref_image.GetSpacing())
+        mask_sitk.SetDirection(ref_image.GetDirection())
+
+    return mask, mask_sitk
+
+
 def run_segmentation(state: dict) -> dict:
     """
     LangGraph node: Extract tumor segmentation mask.
     Priority order:
       1. SegResNet pretrained inference (MONAI)
-      2. Ground-truth BraTS segmentation (fallback)
+            2. Ground-truth segmentation (fallback)
     """
     patient_id = state["patient_id"]
     base_dir = state["base_dir"]
     output_dir = state["output_dir"]
     errors = list(state.get("errors", []))
+    preprocessed_path = state.get("preprocessed_path")
 
     seg_dir = os.path.join(output_dir, "segmentation")
     os.makedirs(seg_dir, exist_ok=True)
@@ -374,6 +419,33 @@ def run_segmentation(state: dict) -> dict:
             msg = f"Error loading GT seg for {patient_id}: {e}"
             print(f"  [ERROR] {msg}")
             errors.append(msg)
+
+    # --- Strategy 3: Heuristic fallback from preprocessed volume ---
+    use_heuristic_fallback = os.environ.get(
+        "ALLOW_HEURISTIC_SEGMENTATION_FALLBACK", "1"
+    ).strip().lower() in ("1", "true", "yes")
+    if use_heuristic_fallback:
+        ref_image = None
+        modality_files = find_modality_files(base_dir)
+        if modality_files:
+            try:
+                ref_path = next(iter(modality_files.values()))
+                ref_image = sitk.ReadImage(ref_path)
+            except Exception:
+                ref_image = None
+
+        heur = heuristic_segmentation_from_preprocessed(preprocessed_path, ref_image)
+        if heur is not None:
+            binary_mask, binary_sitk = heur
+            tumor_voxels = np.sum(binary_mask > 0)
+            total_voxels = binary_mask.size
+            print(f"  Heuristic segmentation: {tumor_voxels}/{total_voxels} tumor voxels "
+                  f"({100 * tumor_voxels / total_voxels:.2f}%)")
+            save_path = os.path.join(seg_dir, f"{patient_id}_seg.nii.gz")
+            sitk.WriteImage(binary_sitk, save_path)
+            print(f"  Saved heuristic segmentation: {save_path}")
+            errors.append(f"Used heuristic segmentation fallback for {patient_id}")
+            return {**state, "segmentation_path": save_path, "errors": errors}
 
     msg = f"No segmentation available for {patient_id}"
     errors.append(msg)

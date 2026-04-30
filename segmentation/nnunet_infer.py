@@ -1,10 +1,10 @@
 """
 Tumor Segmentation Node — nnU-Net Pretrained
 ==============================================
-Uses the official nnU-Net pretrained model for BraTS 2020 brain tumor
+Uses nnU-Net pretrained model inference for brain tumor MRI
 segmentation. Falls back to ground-truth masks if nnU-Net inference fails.
 
-BraTS seg labels:
+Common segmentation labels:
   0 = background
   1 = necrotic / non-enhancing tumor core (NCR/NET)
   2 = peritumoral edema (ED)
@@ -22,11 +22,11 @@ NNUNET_RESULTS = os.environ.get("nnUNet_results", "/workspace/nnUNet_results")
 NNUNET_RAW = os.environ.get("nnUNet_raw", "/workspace/nnUNet_raw")
 NNUNET_PREPROCESSED = os.environ.get("nnUNet_preprocessed", "/workspace/nnUNet_preprocessed")
 
-# BraTS task config for nnU-Net
-BRATS_DATASET_ID = "Dataset137_BraTS2021"  # Standard nnU-Net BraTS task name
-BRATS_TRAINER = "nnUNetTrainer"
-BRATS_CONFIG = "3d_fullres"
-BRATS_FOLDS = "0"
+# nnU-Net task config
+NNUNET_DATASET_ID = os.environ.get("NNUNET_DATASET_ID", "Dataset137_BrainTumorMRI")
+NNUNET_TRAINER = os.environ.get("NNUNET_TRAINER", "nnUNetTrainer")
+NNUNET_CONFIG = os.environ.get("NNUNET_CONFIG", "3d_fullres")
+NNUNET_FOLDS = os.environ.get("NNUNET_FOLDS", "0")
 
 
 def setup_nnunet_env():
@@ -44,9 +44,9 @@ def check_nnunet_available() -> bool:
         import nnunetv2
         # Check if model weights actually exist (not just empty dirs)
         model_dir = os.path.join(
-            NNUNET_RESULTS, BRATS_DATASET_ID, BRATS_TRAINER + "__nnUNetPlans__" + BRATS_CONFIG
+            NNUNET_RESULTS, NNUNET_DATASET_ID, NNUNET_TRAINER + "__nnUNetPlans__" + NNUNET_CONFIG
         )
-        fold_dir = os.path.join(model_dir, f"fold_{BRATS_FOLDS}")
+        fold_dir = os.path.join(model_dir, f"fold_{NNUNET_FOLDS}")
         if os.path.isdir(fold_dir) and any(
             f.endswith('.pth') or f.endswith('.model') for f in os.listdir(fold_dir)
         ):
@@ -60,19 +60,18 @@ def check_nnunet_available() -> bool:
 
 def download_nnunet_weights():
     """
-    Download pretrained nnU-Net weights for BraTS segmentation.
+    Download pretrained nnU-Net weights.
     
     NOTE: As of 2024, nnU-Net V2 does NOT ship official pretrained models.
     The V2 documentation states: "Not yet available for V2".
     If you have your own trained model, place it at:
-      $nnUNet_results/Dataset137_BraTS2021/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_0/checkpoint_final.pth
+            $nnUNet_results/<dataset_id>/<trainer>__nnUNetPlans__<config>/fold_<fold>/checkpoint_final.pth
     
-    The pipeline will use ground-truth segmentation masks (available in BraTS
-    training data) as a valid fallback.
+    The pipeline will use ground-truth segmentation masks as a valid fallback.
     """
     print("  [INFO] nnU-Net V2 does not provide official pretrained models.")
     print("  [INFO] To use nnU-Net inference, place your own trained weights at:")
-    print(f"         {NNUNET_RESULTS}/{BRATS_DATASET_ID}/{BRATS_TRAINER}__nnUNetPlans__{BRATS_CONFIG}/fold_{BRATS_FOLDS}/checkpoint_final.pth")
+    print(f"         {NNUNET_RESULTS}/{NNUNET_DATASET_ID}/{NNUNET_TRAINER}__nnUNetPlans__{NNUNET_CONFIG}/fold_{NNUNET_FOLDS}/checkpoint_final.pth")
     print("  [INFO] Falling back to ground-truth segmentation masks.")
     return False
 
@@ -81,7 +80,7 @@ def prepare_nnunet_input(base_dir: str, patient_id: str) -> str:
     """
     Prepare input files in nnU-Net expected format.
     nnU-Net expects: {case_id}_0000.nii.gz, {case_id}_0001.nii.gz, etc.
-    For BraTS: 0000=T1, 0001=T1CE, 0002=T2, 0003=FLAIR
+    Expected order: 0000=T1, 0001=T1CE, 0002=T2, 0003=FLAIR
     """
     input_dir = os.path.join("/tmp", "nnunet_input", patient_id)
     os.makedirs(input_dir, exist_ok=True)
@@ -111,7 +110,7 @@ def prepare_nnunet_input(base_dir: str, patient_id: str) -> str:
                 found_count += 1
                 break
 
-    # Also check for generic 'image' file (from H5 reconstruction)
+    # Also check for a generic single-image fallback file.
     if found_count == 0:
         for f in os.listdir(base_dir):
             f_lower = f.lower()
@@ -137,10 +136,10 @@ def run_nnunet_inference(input_dir: str, output_dir: str) -> str:
         "nnUNetv2_predict",
         "-i", input_dir,
         "-o", output_dir,
-        "-d", BRATS_DATASET_ID,
-        "-c", BRATS_CONFIG,
-        "-tr", BRATS_TRAINER,
-        "-f", BRATS_FOLDS,
+        "-d", NNUNET_DATASET_ID,
+        "-c", NNUNET_CONFIG,
+        "-tr", NNUNET_TRAINER,
+        "-f", NNUNET_FOLDS,
         "--disable_tta",
     ]
 
@@ -184,7 +183,7 @@ def run_segmentation(state: dict) -> dict:
     LangGraph node: Extract tumor segmentation mask.
     Priority order:
       1. nnU-Net pretrained inference
-      2. Ground-truth BraTS segmentation (fallback)
+            2. Ground-truth segmentation (fallback)
     """
     patient_id = state["patient_id"]
     base_dir = state["base_dir"]

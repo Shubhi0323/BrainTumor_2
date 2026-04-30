@@ -8,7 +8,7 @@ cd "$REPO_DIR"
 
 echo "=== Installing system dependencies ==="
 apt-get update && apt-get install -y --no-install-recommends \
-    build-essential gcc g++ libgl1 libglib2.0-0 libhdf5-dev curl wget unzip zstd
+    build-essential gcc g++ libgl1 libglib2.0-0 curl wget unzip zstd
 
 echo "=== Installing Python dependencies ==="
 pip install --no-cache-dir numpy
@@ -37,10 +37,10 @@ mkdir -p outputs/{preprocessed,segmentation,radiomics,clinical_features,embeddin
 
 echo "=== Setting environment variables ==="
 export OUTPUT_DIR="$REPO_DIR/outputs"
-export DATA_DIR="$REPO_DIR/BraTS2020_training_data/content/data"
+export DATA_DIR="$REPO_DIR/data"
 export OLLAMA_URL="http://localhost:11434"
 export DYNUNET_WEIGHTS_DIR="/workspace/dynunet_weights"
-export DYNUNET_WEIGHTS_FILE="model_brats_mri_segmentation.pt"
+export DYNUNET_WEIGHTS_FILE="model_mri_segmentation.pt"
 export MPLBACKEND=Agg
 
 mkdir -p "$DYNUNET_WEIGHTS_DIR"

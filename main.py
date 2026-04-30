@@ -6,11 +6,10 @@ Phase 2: Embeddings → similarity → WHO/RANO analysis → AI reasoning → re
 Phase 3: Memory → HITL validation → CAP report → visualization → evaluation
 
 Dataset formats:
-  nifti: Standard BraTS NIfTI format (patient folders)
-  h5:    HDF5 slice format (volume_X_slice_Y.h5)
+    nifti: Standard NIfTI format (patient folders)
+    dicom: DICOM series format (patient folders with modality series)
 """
 import os
-import sys
 import json
 import argparse
 
@@ -163,33 +162,35 @@ def process_nifti(data_dir, output_dir, phase, skip_hitl, patient_id=None):
                 process_patient(folder, full_path, output_dir, phase, skip_hitl)
 
 
-def process_h5(data_dir, output_dir, phase, skip_hitl, max_patients=None,
-               patient_id=None):
-    from utils.h5_adapter import discover_volumes, reconstruct_volume, save_reconstructed_volume
-    volumes = discover_volumes(data_dir)
+def process_dicom(data_dir, output_dir, phase, skip_hitl, max_patients=None,
+                  patient_id=None):
+    from utils.dicom_adapter import (
+        discover_dicom_series,
+        convert_dicom_patient,
+        save_dicom_as_nifti,
+        normalize_dicom_patient_id,
+    )
+
+    discovered = discover_dicom_series(data_dir)
+    if not discovered:
+        print(f"[ERROR] No DICOM patients found in {data_dir}")
+        return
 
     if patient_id:
-        # Extract numeric volume ID from patient_id like "volume_10"
-        import re
-        m = re.match(r'volume_(\d+)', patient_id)
-        if m:
-            target_id = int(m.group(1))
-            if target_id in volumes:
-                vol_ids = [target_id]
-            else:
-                print(f"[ERROR] Patient {patient_id} not found in dataset")
-                return
-        else:
-            print(f"[ERROR] Invalid patient_id format: {patient_id}")
+        target_id = normalize_dicom_patient_id(patient_id)
+        if target_id not in discovered:
+            print(f"[ERROR] Patient {patient_id} not found in DICOM dataset")
             return
+        patient_ids = [target_id]
     else:
-        vol_ids = sorted(volumes.keys())[:max_patients] if max_patients else sorted(volumes.keys())
+        patient_ids = sorted(discovered.keys())
+        if max_patients:
+            patient_ids = patient_ids[:max_patients]
 
-    for vol_id in vol_ids:
-        pid = f"volume_{vol_id}"
+    for pid in patient_ids:
         try:
-            img, msk, _ = reconstruct_volume(volumes[vol_id])
-            patient_dir, _ = save_reconstructed_volume(img, msk, pid, output_dir)
+            images = convert_dicom_patient(discovered[pid])
+            patient_dir, _ = save_dicom_as_nifti(images, pid, output_dir)
             process_patient(pid, patient_dir, output_dir, phase, skip_hitl)
         except Exception as e:
             print(f"[ERROR] {pid}: {e}")
@@ -200,12 +201,12 @@ if __name__ == "__main__":
         description="Agentic Clinical Brain Tumor Intelligence Platform"
     )
     parser.add_argument("--data_dir", required=True,
-                        help="Dataset path (NIfTI folders or H5 slices)")
+                        help="Dataset path (NIfTI folders or DICOM studies)")
     parser.add_argument("--output_dir", default="./outputs",
                         help="Output directory")
     parser.add_argument("--patient_id", default=None,
-                        help="Single patient ID (e.g. volume_10 for H5, or folder name for NIfTI)")
-    parser.add_argument("--format", choices=["nifti", "h5"], default="h5",
+                        help="Single patient ID (folder name for NIfTI/DICOM)")
+    parser.add_argument("--format", choices=["nifti", "dicom"], default="dicom",
                         help="Dataset format")
     parser.add_argument("--phase",
                         choices=["1", "2", "3", "23", "all"],
@@ -213,7 +214,7 @@ if __name__ == "__main__":
                         help="Pipeline phase: 1=imaging, 2=agents, 3=clinical, "
                              "23=agents+clinical, all=end-to-end")
     parser.add_argument("--max_patients", type=int, default=None,
-                        help="Max patients (H5 mode)")
+                        help="Max patients (DICOM mode)")
     parser.add_argument("--skip_hitl", action="store_true",
                         help="Auto-approve HITL validation (batch mode)")
     parser.add_argument("--ollama_url", default=os.environ.get("OLLAMA_URL", "http://localhost:11434"),
@@ -225,9 +226,9 @@ if __name__ == "__main__":
     os.environ["OLLAMA_URL"] = args.ollama_url
     os.makedirs(args.output_dir, exist_ok=True)
 
-    if args.format == "h5":
-        process_h5(args.data_dir, args.output_dir, args.phase,
-                   args.skip_hitl, args.max_patients, args.patient_id)
+    if args.format == "dicom":
+        process_dicom(args.data_dir, args.output_dir, args.phase,
+                      args.skip_hitl, args.max_patients, args.patient_id)
     else:
         process_nifti(args.data_dir, args.output_dir, args.phase,
                       args.skip_hitl, args.patient_id)

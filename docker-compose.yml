@@ -59,17 +59,20 @@ services:
         condition: service_healthy
     volumes:
       - ./outputs:/app/outputs
-      - ./BraTS2020_training_data:/app/BraTS2020_training_data:ro
+      - ./data:/app/data:ro
       - dynunet_weights:/workspace/dynunet_weights
       - model_cache:/root/.cache
       - nilearn_data:/root/nilearn_data
     environment:
       - OUTPUT_DIR=/app/outputs
-      - DATA_DIR=/app/BraTS2020_training_data/content/data
+      - DATA_DIR=/app/data
+      - INPUT_FORMAT=dicom
+      - PYTHONPATH=/app
+      - ALLOW_DICOM_MODALITY_FALLBACK=1
       - OLLAMA_URL=http://ollama:11434
       - WEAVIATE_URL=http://weaviate:8080
       - DYNUNET_WEIGHTS_DIR=/workspace/dynunet_weights
-      - DYNUNET_WEIGHTS_FILE=model_brats_mri_segmentation.pt
+      - DYNUNET_WEIGHTS_FILE=model_mri_segmentation.pt
 
 volumes:
   ollama_data:

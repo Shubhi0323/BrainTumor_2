@@ -23,7 +23,7 @@ def n4_bias_field_correction(image: sitk.Image) -> sitk.Image:
 def skull_strip(image: sitk.Image) -> sitk.Image:
     """
     Basic skull stripping using Otsu thresholding.
-    BraTS data is typically already skull-stripped, so this acts as a safety step.
+    Many curated MRI datasets are already skull-stripped, so this acts as a safety step.
     """
     otsu_filter = sitk.OtsuThresholdImageFilter()
     otsu_filter.SetInsideValue(1)
@@ -82,7 +82,7 @@ def preprocess_modality(nifti_path: str) -> sitk.Image:
 def find_modality_file(base_dir: str, modality: str) -> str:
     """
     Locate a specific modality NIfTI file in a patient directory.
-    Handles naming variations like 'T1.nii.gz', 't1.nii.gz', 'BraTS20_..._t1.nii.gz'.
+    Handles naming variations like 'T1.nii.gz', 't1.nii.gz', 'subject_..._t1.nii.gz'.
     """
     modality_lower = modality.lower()
     for f in os.listdir(base_dir):

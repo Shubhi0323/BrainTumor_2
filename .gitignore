@@ -1,6 +1,2 @@
 outputs
-BraTS2020_training_data
-BraTS20\ Training\ Metadata.csv
-clinical_2014-01-16.xlsx
-VASARI_MR_featurekey4.pdf
-VASARI_MRI_features-gmdi-wiki.xls
+data

@@ -157,19 +157,23 @@ def save_3d_rendering(mask: np.ndarray, patient_id: str, save_dir: str):
 def save_progression_chart(history: list, current_volume: float,
                            patient_id: str, save_dir: str):
     """Save a tumor volume progression bar chart over time."""
-    volumes = [h.get("tumor_volume", 0) for h in history] + [current_volume]
-    labels = [f"Scan {i+1}" for i in range(len(history))] + ["Current"]
+    max_points = 60
+    trimmed_history = history[-max_points:] if len(history) > max_points else history
+    volumes = [h.get("tumor_volume", 0) for h in trimmed_history] + [current_volume]
+    offset = max(0, len(history) - len(trimmed_history))
+    labels = [f"Scan {offset + i + 1}" for i in range(len(trimmed_history))] + ["Current"]
 
     if len(volumes) < 2:
         # Still show a single-bar chart
         pass
 
-    fig, ax = plt.subplots(figsize=(max(6, len(volumes) * 1.5), 5),
+    fig_width = min(20, max(6, len(volumes) * 0.6))
+    fig, ax = plt.subplots(figsize=(fig_width, 5),
                            facecolor="black")
     fig.suptitle(f"{patient_id} — Tumor Volume Progression",
                  color="white", fontsize=14, fontweight="bold")
 
-    colors = ["#444488"] * len(history) + ["#e84040"]
+    colors = ["#444488"] * len(trimmed_history) + ["#e84040"]
     bars = ax.bar(labels, volumes, color=colors, edgecolor="white", linewidth=0.5)
     ax.set_facecolor("black")
     ax.set_ylabel("Volume (mm³)", color="white")

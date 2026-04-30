@@ -8,7 +8,7 @@ Run as:
   python -m evaluation.runner --output_dir ./outputs
 
 Or with specific patient:
-  python -m evaluation.runner --output_dir ./outputs --patient_id BraTS20_Training_001
+    python -m evaluation.runner --output_dir ./outputs --patient_id patient_001
 """
 import os
 import json

@@ -7,16 +7,36 @@ import os
 import re
 import json
 import glob
+import io
+import zipfile
 import subprocess
 import time
+import sys
+import warnings
 from datetime import datetime
 import numpy as np
 import streamlit as st
+import pydicom
+from PIL import Image
+from PIL import ImageFile
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+# Output images are generated locally by this app; allow large images to render
+# instead of triggering PIL decompression-bomb protection.
+Image.MAX_IMAGE_PIXELS = None
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+warnings.filterwarnings("ignore", category=Image.DecompressionBombWarning)
 
 OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "./outputs")
-DATA_DIR = os.environ.get("DATA_DIR", "./BraTS2020_training_data/content/data")
+INPUT_FORMAT = "dicom"
 JOBS_DIR = os.path.join(OUTPUT_DIR, ".jobs")
+UPLOADS_DIR = os.path.join(OUTPUT_DIR, "uploaded_data")
+HITL_REVIEWS_PATH = os.path.join(JOBS_DIR, "hitl_reviews.json")
 os.makedirs(JOBS_DIR, exist_ok=True)
+os.makedirs(UPLOADS_DIR, exist_ok=True)
 
 
 # ── Job tracking ─────────────────────────────────────────────
@@ -38,28 +58,167 @@ def set_job_status(patient_id, status, **extra):
         json.dump(data, f)
 
 
-def start_pipeline_job(patient_id):
+def load_hitl_reviews():
+    if os.path.exists(HITL_REVIEWS_PATH):
+        try:
+            with open(HITL_REVIEWS_PATH) as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+    return {}
+
+
+def get_hitl_review(patient_id):
+    return load_hitl_reviews().get(patient_id, {})
+
+
+def save_hitl_review(patient_id, reviewer, approved, notes):
+    reviews = load_hitl_reviews()
+    reviews[patient_id] = {
+        "patient_id": patient_id,
+        "reviewer": (reviewer or "").strip(),
+        "approved": bool(approved),
+        "notes": (notes or "").strip(),
+        "updated_at": datetime.now().isoformat(),
+    }
+    with open(HITL_REVIEWS_PATH, "w") as f:
+        json.dump(reviews, f, indent=2)
+
+
+def start_pipeline_job(patient_id, data_dir, input_format="dicom"):
     """Launch pipeline as a background process."""
+    run_data_dir = (data_dir or "").strip()
+    run_input_format = (input_format or "dicom").lower()
+    if not run_data_dir or not os.path.isdir(run_data_dir):
+        print(f"[ERROR] Invalid data directory for {patient_id}: {run_data_dir}")
+        return False
+
     log_path = os.path.join(JOBS_DIR, f"{patient_id}.log")
-    set_job_status(patient_id, "running", started_at=datetime.now().isoformat(), log_file=log_path)
-    main_py = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "main.py")
+    set_job_status(patient_id, "running", started_at=datetime.now().isoformat(),
+                   log_file=log_path, data_dir=run_data_dir, input_format=run_input_format)
+    main_py = os.path.join(PROJECT_ROOT, "main.py")
+    run_env = os.environ.copy()
+    existing_pythonpath = run_env.get("PYTHONPATH", "")
+    run_env["PYTHONPATH"] = PROJECT_ROOT if not existing_pythonpath else f"{PROJECT_ROOT}:{existing_pythonpath}"
     with open(log_path, "w") as log_file:
         proc = subprocess.Popen(
             [
                 "python", main_py,
-                "--data_dir", DATA_DIR,
-                "--format", "h5",
+                "--data_dir", run_data_dir,
+                "--format", run_input_format,
                 "--phase", "all",
                 "--output_dir", OUTPUT_DIR,
                 "--skip_hitl",
                 "--patient_id", patient_id,
             ],
             stdout=log_file, stderr=subprocess.STDOUT,
+            cwd=PROJECT_ROOT,
+            env=run_env,
         )
     # Store PID for process liveness checking
     set_job_status(patient_id, "running",
                    started_at=datetime.now().isoformat(),
-                   log_file=log_path, pid=proc.pid)
+                   log_file=log_path, pid=proc.pid,
+                   data_dir=run_data_dir, input_format=run_input_format)
+    return True
+
+
+def _safe_token(text):
+    token = re.sub(r"[^A-Za-z0-9._-]+", "_", (text or "").strip())
+    return token.strip("._-") or "uploaded_patient"
+
+
+def stage_uploaded_dicoms(uploaded_files, patient_id):
+    """Persist uploaded DICOM files into a temporary dataset layout."""
+    if not uploaded_files:
+        return None, None, 0, 0
+
+    normalized_patient = _safe_token(patient_id)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    data_root = os.path.join(UPLOADS_DIR, f"session_{stamp}")
+    patient_root = os.path.join(data_root, normalized_patient)
+
+    valid_count = 0
+    invalid_count = 0
+    for idx, up in enumerate(uploaded_files, start=1):
+        blob = up.getvalue()
+        try:
+            ds = pydicom.dcmread(io.BytesIO(blob), stop_before_pixels=True, force=True)
+            series_uid = _safe_token(str(getattr(ds, "SeriesInstanceUID", "series_unknown")))
+            instance_no = getattr(ds, "InstanceNumber", idx)
+            series_dir = os.path.join(patient_root, f"series_{series_uid}")
+            os.makedirs(series_dir, exist_ok=True)
+
+            orig_name = _safe_token(os.path.basename(up.name))
+            try:
+                instance_token = f"{int(instance_no):05d}"
+            except Exception:
+                instance_token = f"{idx:05d}"
+            fname = f"{instance_token}_{orig_name}.dcm"
+            with open(os.path.join(series_dir, fname), "wb") as f:
+                f.write(blob)
+            valid_count += 1
+        except Exception:
+            invalid_count += 1
+
+    if valid_count == 0:
+        return None, None, 0, invalid_count
+
+    return data_root, normalized_patient, valid_count, invalid_count
+
+
+def stage_dicom_zip(uploaded_zip, patient_id):
+    """Stage all readable DICOM files from an uploaded ZIP folder export."""
+    if uploaded_zip is None:
+        return None, None, 0, 0, "Please upload a ZIP file first."
+
+    normalized_patient = _safe_token(patient_id)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    data_root = os.path.join(UPLOADS_DIR, f"session_{stamp}")
+    patient_root = os.path.join(data_root, normalized_patient)
+
+    valid_count = 0
+    invalid_count = 0
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(uploaded_zip.getvalue()))
+    except Exception:
+        return None, None, 0, 0, "Uploaded file is not a valid ZIP archive."
+
+    for idx, member in enumerate(sorted(zf.namelist()), start=1):
+        if member.endswith("/"):
+            continue
+        try:
+            blob = zf.read(member)
+            if not blob:
+                continue
+
+            ds = pydicom.dcmread(io.BytesIO(blob), stop_before_pixels=True, force=True)
+            series_uid = _safe_token(str(getattr(ds, "SeriesInstanceUID", "series_unknown")))
+            member_dir = os.path.dirname(member).strip()
+            series_hint = _safe_token(os.path.basename(member_dir)) if member_dir else ""
+            instance_no = getattr(ds, "InstanceNumber", idx)
+            series_name = f"series_{series_hint}_{series_uid}" if series_hint else f"series_{series_uid}"
+            series_dir = os.path.join(patient_root, series_name)
+            os.makedirs(series_dir, exist_ok=True)
+
+            orig_name = _safe_token(os.path.basename(member))
+            try:
+                instance_token = f"{int(instance_no):05d}"
+            except Exception:
+                instance_token = f"{idx:05d}"
+            dst_path = os.path.join(series_dir, f"{instance_token}_{orig_name}.dcm")
+            with open(dst_path, "wb") as f:
+                f.write(blob)
+            valid_count += 1
+        except Exception:
+            invalid_count += 1
+
+    if valid_count == 0:
+        return None, None, 0, invalid_count, "No readable DICOM files found in ZIP."
+
+    return data_root, normalized_patient, valid_count, invalid_count, ""
 
 
 def _is_pid_alive(pid):
@@ -78,6 +237,10 @@ def check_running_jobs():
     for f in glob.glob(os.path.join(JOBS_DIR, "*.json")):
         with open(f) as fh:
             job = json.load(fh)
+        source_meta = {
+            "data_dir": job.get("data_dir", ""),
+            "input_format": job.get("input_format", "dicom"),
+        }
         status = job.get("status", "")
         pid_val = job.get("patient_id", "")
         log_path = job.get("log_file", "")
@@ -93,12 +256,12 @@ def check_running_jobs():
                 set_job_status(pid_val, "completed_with_errors",
                                started_at=job.get("started_at"),
                                finished_at=datetime.now().isoformat(),
-                               log_file=log_path, errors=errors)
+                               log_file=log_path, errors=errors, **source_meta)
             else:
                 set_job_status(pid_val, "completed",
                                started_at=job.get("started_at"),
                                finished_at=datetime.now().isoformat(),
-                               log_file=log_path)
+                               log_file=log_path, **source_meta)
             continue
 
         if status != "running":
@@ -114,18 +277,21 @@ def check_running_jobs():
                                started_at=job.get("started_at"),
                                finished_at=datetime.now().isoformat(),
                                log_file=log_path,
-                               errors=errors)
+                               errors=errors,
+                               **source_meta)
             else:
                 set_job_status(pid_val, "completed",
                                started_at=job.get("started_at"),
                                finished_at=datetime.now().isoformat(),
-                               log_file=log_path)
+                               log_file=log_path,
+                               **source_meta)
         elif proc_pid and not _is_pid_alive(proc_pid):
             # Process exited without producing a report = failed
             set_job_status(pid_val, "failed",
                            started_at=job.get("started_at"),
                            finished_at=datetime.now().isoformat(),
-                           log_file=log_path)
+                           log_file=log_path,
+                           **source_meta)
         elif log_path and os.path.exists(log_path):
             # Fallback: check log staleness (no PID available)
             mtime = os.path.getmtime(log_path)
@@ -134,7 +300,8 @@ def check_running_jobs():
                 set_job_status(pid_val, "failed",
                                started_at=job.get("started_at"),
                                finished_at=datetime.now().isoformat(),
-                               log_file=log_path)
+                               log_file=log_path,
+                               **source_meta)
 
 
 def get_all_jobs():
@@ -146,20 +313,26 @@ def get_all_jobs():
     return jobs
 
 
-def discover_all_patients():
-    """Discover all patients from the raw H5 data directory."""
+def discover_all_patients(format_name, data_dir):
+    """Discover all patients from the selected input format."""
     patients = set()
-    if os.path.isdir(DATA_DIR):
-        pattern = re.compile(r'volume_(\d+)_slice_\d+\.h5')
-        for f in os.listdir(DATA_DIR):
-            match = pattern.match(f)
-            if match:
-                patients.add(f"volume_{match.group(1)}")
-    # Also check NIfTI folders
-    if not patients and os.path.isdir(DATA_DIR):
-        for d in os.listdir(DATA_DIR):
-            if os.path.isdir(os.path.join(DATA_DIR, d)):
-                patients.add(d)
+
+    if format_name == "dicom" and os.path.isdir(data_dir):
+        try:
+            from utils.dicom_adapter import discover_dicom_series
+            discovered = discover_dicom_series(data_dir)
+            patients.update(discovered.keys())
+        except Exception as e:
+            print(f"[WARNING] DICOM discovery failed: {e}")
+
+        # Fallback for staged uploads: include patient folders even when
+        # modality inference cannot classify all series yet.
+        if not patients:
+            for name in sorted(os.listdir(data_dir)):
+                full = os.path.join(data_dir, name)
+                if os.path.isdir(full) and not name.startswith("."):
+                    patients.add(name)
+
     return sorted(patients)
 
 
@@ -215,6 +388,45 @@ def get_viz_images(patient_id):
                 label = f.replace(f"{patient_id}_", "").replace(".png", "").replace("_", " ").title()
                 images[label] = os.path.join(viz_dir, f)
     return images
+
+
+def render_image_safe(path):
+    """Render image without crashing the page on PIL size guard errors."""
+    try:
+        st.image(path, width="stretch")
+    except Exception as e:
+        st.warning(f"Could not display image {os.path.basename(path)}: {e}")
+
+
+def render_hitl_review_form(patient_id):
+    review = get_hitl_review(patient_id)
+    with st.expander("🧑‍⚕️ Final Human Review", expanded=(not bool(review))):
+        reviewer = st.text_input(
+            "Reviewer",
+            value=review.get("reviewer", ""),
+            key=f"hitl_reviewer_{patient_id}",
+        )
+        approved = st.checkbox(
+            "Approved for final sign-off",
+            value=bool(review.get("approved", False)),
+            key=f"hitl_approved_{patient_id}",
+        )
+        notes = st.text_area(
+            "Final review notes",
+            value=review.get("notes", ""),
+            height=100,
+            key=f"hitl_notes_{patient_id}",
+        )
+        if st.button("Save Final Review", key=f"save_hitl_{patient_id}", use_container_width=True):
+            save_hitl_review(patient_id, reviewer, approved, notes)
+            st.success("Final review saved.")
+            st.rerun()
+
+        if review:
+            status = "Approved" if review.get("approved") else "Pending approval"
+            updated = review.get("updated_at", "")[:19]
+            reviewer_name = review.get("reviewer", "Unassigned")
+            st.caption(f"Latest review: {status} · Reviewer: {reviewer_name} · Updated: {updated}")
 
 
 # ── Page config ──────────────────────────────────────────────
@@ -302,13 +514,44 @@ check_running_jobs()
 with st.sidebar:
     st.markdown("## 🧠 Brain Tumor Analysis")
     st.markdown("---")
+    st.caption("Upload a patient DICOM folder as ZIP to stage data for processing.")
+    active_format = "dicom"
+    upload_patient_id = st.text_input("Patient ID", value="uploaded_patient")
+    uploaded_zip = st.file_uploader(
+        "Or upload patient folder as ZIP",
+        type=["zip"],
+        accept_multiple_files=False,
+        help="Export or zip your local patient DICOM folder and upload it here.",
+    )
 
-    all_patients = discover_all_patients()
+    if st.button("Stage ZIP Folder", use_container_width=True):
+        staged_dir, staged_pid, ok_count, bad_count, err = stage_dicom_zip(uploaded_zip, upload_patient_id)
+        if staged_dir and staged_pid:
+            st.session_state["uploaded_data_dir"] = staged_dir
+            st.session_state["uploaded_patient_id"] = staged_pid
+            st.success(f"Staged {ok_count} DICOM file(s) from ZIP for patient '{staged_pid}'.")
+            if bad_count:
+                st.warning(f"Skipped {bad_count} non-DICOM or unreadable file(s).")
+        else:
+            st.error(err or "Could not stage ZIP folder.")
+
+    active_data_dir = st.session_state.get("uploaded_data_dir", "")
+    staged_pid = st.session_state.get("uploaded_patient_id")
+    if staged_pid:
+        st.caption(f"Staged patient: {staged_pid}")
+    if active_data_dir:
+        st.caption(f"Staged dataset: {active_data_dir}")
+
+    all_patients = discover_all_patients(active_format, active_data_dir)
+    staged_pid = st.session_state.get("uploaded_patient_id")
+    if staged_pid and staged_pid not in all_patients:
+        all_patients = sorted(set(all_patients + [staged_pid]))
     processed = find_processed_patients()
 
     if not all_patients:
-        st.warning("No patients found in data directory.")
-        st.code(f"Data dir: {os.path.abspath(DATA_DIR)}")
+        st.warning("No staged DICOM patients available for processing.")
+        if active_data_dir:
+            st.code(f"Staged data dir: {os.path.abspath(active_data_dir)}")
         st.stop()
 
     # Build display labels showing status
@@ -355,17 +598,23 @@ with st.sidebar:
                 with st.expander("Last log lines"):
                     st.code(last_lines, language="text")
         if st.button("🔄 Retry Pipeline", type="primary", use_container_width=True):
-            start_pipeline_job(patient_id)
-            st.success("Pipeline restarted!")
-            time.sleep(1)
-            st.rerun()
+            retry_data_dir = (job or {}).get("data_dir", active_data_dir)
+            retry_format = (job or {}).get("input_format", active_format)
+            if start_pipeline_job(patient_id, retry_data_dir, retry_format):
+                st.success("Pipeline restarted!")
+                time.sleep(1)
+                st.rerun()
+            else:
+                st.error("Cannot restart: staged data directory not available.")
     elif not patient_processed:
         st.warning("Not yet processed")
         if st.button("🚀 Run Pipeline", type="primary", use_container_width=True):
-            start_pipeline_job(patient_id)
-            st.success("Pipeline started in background!")
-            time.sleep(1)
-            st.rerun()
+            if start_pipeline_job(patient_id, active_data_dir, active_format):
+                st.success("Pipeline started in background!")
+                time.sleep(1)
+                st.rerun()
+            else:
+                st.error("Stage DICOM files first before running the pipeline.")
     else:
         # Processed patient — show info and reprocess option
         report = load_report(patient_id)
@@ -381,10 +630,12 @@ with st.sidebar:
                 st.success("Pipeline completed successfully")
 
         if st.button("🔄 Reprocess Patient", use_container_width=True):
-            start_pipeline_job(patient_id)
-            st.success("Reprocessing started in background!")
-            time.sleep(1)
-            st.rerun()
+            if start_pipeline_job(patient_id, active_data_dir, active_format):
+                st.success("Reprocessing started in background!")
+                time.sleep(1)
+                st.rerun()
+            else:
+                st.error("Cannot reprocess: staged data directory not available.")
 
     st.markdown("---")
     st.markdown("### Navigation")
@@ -500,7 +751,7 @@ elif section == "MRI Visualization":
             for i, (label, path) in enumerate(top_imgs.items()):
                 with cols[i]:
                     st.markdown(f"#### {label}")
-                    st.image(path, width="stretch")
+                    render_image_safe(path)
 
         if other_imgs:
             st.markdown("---")
@@ -508,7 +759,7 @@ elif section == "MRI Visualization":
             for i, (label, path) in enumerate(other_imgs.items()):
                 with cols[i % 3]:
                     st.markdown(f"#### {label}")
-                    st.image(path, width="stretch")
+                    render_image_safe(path)
     else:
         st.warning("No visualization images found. Run the full pipeline to generate them.")
 
@@ -721,6 +972,10 @@ elif section == "CAP Report":
                                 st.markdown(f"**{label}:** {v}")
                     else:
                         st.write(data)
+
+                    if key == "section_9_physician_notes":
+                        st.markdown("---")
+                        render_hitl_review_form(patient_id)
     else:
         st.warning("No CAP report found. Run the full pipeline (Phase 3) to generate it.")
 
@@ -782,13 +1037,15 @@ elif section == "Processing Status":
                     errors = j.get("errors", [])
                     if errors:
                         for e in errors[:3]:
-                            st.error(e)
+                            st.warning(e)
                     finished = j.get("finished_at", "")[:19]
                     st.caption(f"Started: {j.get('started_at', '')[:19]} · Finished: {finished}")
                 with c2:
                     if st.button("🔄 Reprocess", key=f"reprocess_{j['patient_id']}", use_container_width=True):
-                        start_pipeline_job(j["patient_id"])
-                        st.rerun()
+                        if start_pipeline_job(j["patient_id"], j.get("data_dir", ""), j.get("input_format", "dicom")):
+                            st.rerun()
+                        else:
+                            st.info("Cannot reprocess: original staged data directory no longer exists.")
                     log_path = j.get("log_file", "")
                     if log_path and os.path.exists(log_path):
                         with st.expander("Full log"):
@@ -808,8 +1065,10 @@ elif section == "Processing Status":
                     st.caption(f"Started: {started} · Finished: {finished}")
                 with c2:
                     if st.button("🔄 Reprocess", key=f"reprocess_{j['patient_id']}", use_container_width=True):
-                        start_pipeline_job(j["patient_id"])
-                        st.rerun()
+                        if start_pipeline_job(j["patient_id"], j.get("data_dir", ""), j.get("input_format", "dicom")):
+                            st.rerun()
+                        else:
+                            st.info("Cannot reprocess: original staged data directory no longer exists.")
 
     if not jobs:
         st.info("No processing jobs yet. Select a patient and click 'Run Pipeline' to start.")

@@ -1,9 +1,8 @@
-BraTS2020_training_data/
+data/
 outputs/
 .venv/
 __pycache__/
 *.pyc
 .git/
-*.h5
 *.nii.gz
 *.npy

@@ -2,6 +2,8 @@
 
 An end-to-end agentic pipeline for brain tumor MRI analysis, clinical reasoning, and structured report generation. Built with LangGraph, MONAI DynUNet, BioClinicalBERT, and Llama 3.
 
+Supported dataset formats: DICOM (default) and NIfTI.
+
 ## Overview
 
 The system processes brain MRI scans through three phases:
@@ -39,7 +41,7 @@ The system processes brain MRI scans through three phases:
 ├── validation/hitl.py         # Human-in-the-loop review
 ├── visualization/viewer.py    # 5-panel MRI visualization
 ├── evaluation/                # Dice, Hausdorff, ICC, Precision@K metrics
-├── utils/h5_adapter.py        # BraTS H5 → 3D volume reconstruction
+├── utils/dicom_adapter.py     # DICOM series discovery + NIfTI conversion
 ├── ui/app.py                  # Streamlit dashboard
 ├── Dockerfile
 ├── Dockerfile.ui
@@ -52,7 +54,7 @@ The system processes brain MRI scans through three phases:
 
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed and running
 - At least **8 GB RAM** allocated to Docker (Llama 3 + pipeline)
-- The BraTS2020 dataset already present in `BraTS2020_training_data/`
+- Input MRI dataset mounted at `data/` (DICOM folders or NIfTI patient folders)
 
 ### Run the Pipeline
 
@@ -62,14 +64,14 @@ docker compose up --build
 
 # Process more patients (edit max_patients in docker-compose.yml or override)
 docker compose run --rm pipeline \
-  --data_dir /app/BraTS2020_training_data/content/data \
-  --format h5 --phase all --output_dir /app/outputs \
+  --data_dir /app/data \
+  --format dicom --phase all --output_dir /app/outputs \
   --skip_hitl --max_patients 5
 
 # Run only Phase 1 (imaging — no Ollama/Weaviate needed)
 docker compose run --rm pipeline \
-  --data_dir /app/BraTS2020_training_data/content/data \
-  --format h5 --phase 1 --output_dir /app/outputs \
+  --data_dir /app/data \
+  --format dicom --phase 1 --output_dir /app/outputs \
   --max_patients 1
 
 # Shut down all services
@@ -80,8 +82,8 @@ docker compose down
 
 ```bash
 docker compose run --rm pipeline \
-  --data_dir /app/BraTS2020_training_data/content/data \
-  --format h5 --phase all --output_dir /app/outputs \
+  --data_dir /app/data \
+  --format dicom --phase all --output_dir /app/outputs \
   --skip_hitl --max_patients 1 --evaluate
 ```
 
@@ -122,25 +124,30 @@ docker run -d -p 8080:8080 semitechnologies/weaviate:1.28.2
 ```bash
 # Full pipeline on 1 patient
 python main.py \
-  --data_dir ./BraTS2020_training_data/content/data \
-  --format h5 --phase all --output_dir ./outputs \
+  --data_dir ./data \
+  --format dicom --phase all --output_dir ./outputs \
   --skip_hitl --max_patients 1
 
 # Single patient by ID
 python main.py \
-  --data_dir ./BraTS2020_training_data/content/data \
-  --format h5 --phase all --output_dir ./outputs \
-  --skip_hitl --patient_id volume_1
+  --data_dir ./data \
+  --format dicom --phase all --output_dir ./outputs \
+  --skip_hitl --patient_id patient_001
 
 # NIfTI format
 python main.py \
   --data_dir /path/to/nifti_patients \
   --format nifti --phase all --output_dir ./outputs
 
+# DICOM format (patient folders with DICOM series)
+python main.py \
+  --data_dir /path/to/dicom_patients \
+  --format dicom --phase all --output_dir ./outputs
+
 # Custom Ollama URL
 python main.py \
-  --data_dir ./BraTS2020_training_data/content/data \
-  --format h5 --phase all --output_dir ./outputs \
+  --data_dir ./data \
+  --format dicom --phase all --output_dir ./outputs \
   --ollama_url http://192.168.1.5:11434
 ```
 
@@ -148,15 +155,31 @@ python main.py \
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--data_dir` | *required* | Path to dataset (NIfTI folders or H5 slices) |
+| `--data_dir` | *required* | Path to dataset (DICOM studies or NIfTI folders) |
 | `--output_dir` | `./outputs` | Output directory for all results |
-| `--format` | `h5` | Dataset format: `h5` or `nifti` |
+| `--format` | `dicom` | Dataset format: `dicom` or `nifti` |
 | `--phase` | `all` | Pipeline phase: `1`, `2`, `3`, `23`, or `all` |
-| `--patient_id` | `None` | Process a single patient (NIfTI mode) |
-| `--max_patients` | `None` | Limit number of patients (H5 mode) |
+| `--patient_id` | `None` | Process a single patient (folder name for NIfTI/DICOM) |
+| `--max_patients` | `None` | Limit number of patients (DICOM mode) |
 | `--skip_hitl` | `False` | Auto-approve physician validation |
 | `--ollama_url` | `http://localhost:11434` | Ollama API endpoint |
 | `--evaluate` | `False` | Run evaluation metrics after pipeline |
+
+## DICOM Input Contract
+
+Expected structure:
+
+```text
+data_dir/
+  patient_001/
+    <series folders with DICOM files>
+  patient_002/
+    <series folders with DICOM files>
+```
+
+The pipeline auto-maps series to modalities using folder names and DICOM metadata
+(`SeriesDescription`, `ProtocolName`, and `SequenceName`). Required modalities:
+`t1`, `t1ce`, `t2`, `flair`.
 
 ## Output Structure
 
@@ -180,14 +203,14 @@ outputs/
 
 | Model | Purpose | Source | Fallback |
 |-------|---------|--------|----------|
-| DynUNet (MONAI) | Tumor segmentation | Pretrained weights (user-provided) | Ground-truth BraTS mask |
+| DynUNet (MONAI) | Tumor segmentation | Pretrained weights (user-provided) | Ground-truth mask |
 | BioClinicalBERT | Clinical text embeddings | HuggingFace | Manual feature vector |
 | Llama 3 | Clinical reasoning | Ollama (local) | Rule-based text generation |
 | Harvard-Oxford Atlas | Brain region mapping | nilearn | Heuristic geometry |
 
 ## Notes
 
-- **No training involved** — all models are used for inference only. The BraTS2020 dataset serves as evaluation/demo data.
+- **No training involved** — all models are used for inference only.
 - **Graceful degradation** — every component has a fallback. The pipeline runs without GPU, Ollama, or Weaviate, but output quality decreases.
 - **macOS compatible** — runs natively or via Docker Desktop. No CUDA required (CPU inference throughout).
 - **HITL validation** — use `--skip_hitl` for batch/automated runs. Without it, the pipeline prompts for physician review in the terminal.

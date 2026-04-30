@@ -1,7 +1,7 @@
 FROM python:3.11-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential gcc g++ libgl1 libglib2.0-0 libhdf5-dev git curl wget unzip \
+    build-essential gcc g++ libgl1 libglib2.0-0 git curl wget unzip \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -17,7 +17,7 @@ COPY . .
 RUN mkdir -p /app/outputs /workspace/dynunet_weights
 
 ENV DYNUNET_WEIGHTS_DIR=/workspace/dynunet_weights
-ENV DYNUNET_WEIGHTS_FILE=model_brats_mri_segmentation.pt
+ENV DYNUNET_WEIGHTS_FILE=model_mri_segmentation.pt
 ENV MPLBACKEND=Agg
 
 EXPOSE 8501
