@@ -307,4 +307,4 @@ if __name__ == "__main__":
     # Optional evaluation pass
     if args.evaluate:
         from evaluation.runner import run_evaluation
-        run_evaluation(args.output_dir, args.patient_id)
+        run_evaluation(args.output_dir, args.patient_id, args.data_dir)
