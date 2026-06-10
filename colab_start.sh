@@ -183,6 +183,9 @@ echo "=== [7/7] Starting Streamlit UI ==="
 streamlit run ui/app.py \
     --server.address=0.0.0.0 \
     --server.port=8501 \
+    --server.headless=true \
+    --server.enableCORS=false \
+    --server.enableXsrfProtection=false \
     --browser.gatherUsageStats=false \
     > /tmp/streamlit.log 2>&1 &
 
