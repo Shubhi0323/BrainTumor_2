@@ -16,7 +16,8 @@
 #    !bash colab_start.sh
 #
 #  Cell 4 – Open the UI (printed at end of this script):
-#    # Click the public ngrok URL printed at the bottom
+#    # Click the public localtunnel URL printed at the bottom
+#    # No account or token needed — localtunnel is 100% free
 # ============================================================
 
 set -e  # Exit on any error
@@ -34,7 +35,7 @@ echo "=== Working directory: $REPO_DIR ==="
 echo ""
 echo "=== [1/7] Installing system dependencies ==="
 apt-get update -qq && apt-get install -y -qq --no-install-recommends \
-    build-essential gcc g++ libgl1 libglib2.0-0 curl wget unzip zstd
+    build-essential gcc g++ libgl1 libglib2.0-0 curl wget unzip zstd nodejs npm
 
 # ── 3. PYTHON DEPENDENCIES ───────────────────────────────────────────
 echo ""
@@ -53,8 +54,8 @@ pip install --no-cache-dir -q torch torchvision \
 # All other project dependencies
 pip install --no-cache-dir -q -r requirements.txt
 
-# pyngrok to expose Streamlit UI from Colab
-pip install --no-cache-dir -q pyngrok
+# localtunnel to expose Streamlit UI — free, no account or token needed
+npm install -g localtunnel -q 2>/dev/null || true
 
 echo "✓ Python dependencies installed."
 
@@ -141,7 +142,7 @@ if [ ! -d "$DATA_DIR" ]; then
     echo "  The pipeline will still start but will find 0 patients."
 fi
 
-# ── 8. STREAMLIT UI via ngrok tunnel ─────────────────────────────────
+# ── 8. STREAMLIT UI via localtunnel ──────────────────────────────────
 echo ""
 echo "=== [7/7] Starting Streamlit UI ==="
 
@@ -154,25 +155,46 @@ streamlit run ui/app.py \
 
 STREAMLIT_PID=$!
 echo "  Streamlit starting (PID: $STREAMLIT_PID)..."
-sleep 5
 
-# Open a public URL via ngrok
-python - <<'EOF'
-from pyngrok import ngrok
-import time
+# Wait for Streamlit to actually be up before tunneling
+for i in $(seq 1 20); do
+    if curl -s http://localhost:8501 >/dev/null 2>&1; then
+        echo "  ✓ Streamlit is ready (took ${i}s)"
+        break
+    fi
+    sleep 1
+done
 
-try:
-    # Open tunnel on port 8501
-    public_url = ngrok.connect(8501)
-    print("\n" + "="*60)
-    print("  ✓ NeuroAgent is LIVE!")
-    print(f"  🌐 Open this URL in your browser:")
-    print(f"  👉  {public_url}")
-    print("="*60 + "\n")
-    print("  Tip: Keep this Colab cell running to maintain the tunnel.")
-    print("  DATA_DIR must contain BraTS patient folders for the pipeline to run.")
-except Exception as e:
-    print(f"  ⚠ ngrok tunnel failed: {e}")
-    print("  Try: !pip install pyngrok and set your ngrok auth token.")
-    print("  Or access Streamlit directly at http://localhost:8501 if running locally.")
-EOF
+# ── Open public URL via localtunnel (no account needed) ───────────────
+echo ""
+echo "  Opening public tunnel via localtunnel..."
+
+# Run localtunnel and capture the URL
+lt --port 8501 > /tmp/lt.log 2>&1 &
+LT_PID=$!
+sleep 4
+
+# Extract the URL from localtunnel output
+LT_URL=$(grep -oP 'https://[a-z0-9\-]+\.loca\.lt' /tmp/lt.log | head -1)
+
+if [ -n "$LT_URL" ]; then
+    echo ""
+    echo "============================================================"
+    echo "  ✓ NeuroAgent is LIVE!"
+    echo "  🌐 Open this URL in your browser:"
+    echo "  👉  $LT_URL"
+    echo ""
+    echo "  ⚠ First time opening? localtunnel may show a"
+    echo "  password prompt — enter your Colab machine's IP:"
+    echo "  👉  $(curl -s ifconfig.me 2>/dev/null || echo 'check /tmp/lt.log')"
+    echo "============================================================"
+else
+    echo "  ⚠ localtunnel URL not detected. Check /tmp/lt.log"
+    echo "  Streamlit is still running at localhost:8501 internally."
+    cat /tmp/lt.log
+fi
+
+echo ""
+echo "  Tip: Keep this Colab session alive to maintain the tunnel."
+echo "  DATA_DIR must contain BraTS patient folders for the pipeline to run."
+echo "  Streamlit log: /tmp/streamlit.log"
