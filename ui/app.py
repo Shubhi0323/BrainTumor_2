@@ -514,33 +514,70 @@ check_running_jobs()
 with st.sidebar:
     st.markdown("## 🧠 Brain Tumor Analysis")
     st.markdown("---")
-    st.caption("Upload a patient DICOM folder as ZIP to stage data for processing.")
-    active_format = "dicom"
-    upload_patient_id = st.text_input("Patient ID", value="uploaded_patient")
-    uploaded_zip = st.file_uploader(
-        "Or upload patient folder as ZIP",
-        type=["zip"],
-        accept_multiple_files=False,
-        help="Export or zip your local patient DICOM folder and upload it here.",
+
+    # ── Input mode selector ──────────────────────────────────
+    input_mode = st.radio(
+        "Data Source",
+        ["📁 Local Directory (BraTS / NIfTI)", "📤 Upload DICOM ZIP"],
+        key="input_mode",
     )
 
-    if st.button("Stage ZIP Folder", use_container_width=True):
-        staged_dir, staged_pid, ok_count, bad_count, err = stage_dicom_zip(uploaded_zip, upload_patient_id)
-        if staged_dir and staged_pid:
-            st.session_state["uploaded_data_dir"] = staged_dir
-            st.session_state["uploaded_patient_id"] = staged_pid
-            st.success(f"Staged {ok_count} DICOM file(s) from ZIP for patient '{staged_pid}'.")
-            if bad_count:
-                st.warning(f"Skipped {bad_count} non-DICOM or unreadable file(s).")
-        else:
-            st.error(err or "Could not stage ZIP folder.")
+    if input_mode == "📁 Local Directory (BraTS / NIfTI)":
+        # Use a local path already on the Colab filesystem
+        default_data_dir = os.environ.get("DATA_DIR", "")
+        local_dir = st.text_input(
+            "Dataset directory path",
+            value=default_data_dir,
+            help="Full path to the folder containing patient sub-folders. "
+                 "For BraTS: the folder that contains BraTS20_Training_XXX sub-dirs.",
+            key="local_dir_input",
+        )
+        active_format = st.selectbox(
+            "Format",
+            ["nifti", "dicom"],
+            key="format_selector",
+            help="BraTS 2020 uses NIfTI (.nii.gz). Use DICOM for real hospital scans.",
+        )
+        if st.button("Use This Directory", use_container_width=True):
+            if local_dir and os.path.isdir(local_dir):
+                st.session_state["uploaded_data_dir"] = local_dir
+                st.session_state["uploaded_patient_id"] = None
+                st.success(f"Directory set: {local_dir}")
+                st.rerun()
+            else:
+                st.error(f"Directory not found: {local_dir}")
+        active_data_dir = st.session_state.get("uploaded_data_dir",
+                                                 default_data_dir)
 
-    active_data_dir = st.session_state.get("uploaded_data_dir", "")
+    else:
+        # Upload DICOM ZIP
+        active_format = "dicom"
+        st.caption("Upload a patient DICOM folder as ZIP to stage data for processing.")
+        upload_patient_id = st.text_input("Patient ID", value="uploaded_patient")
+        uploaded_zip = st.file_uploader(
+            "Upload patient folder as ZIP",
+            type=["zip"],
+            accept_multiple_files=False,
+            help="Zip your local patient DICOM folder and upload it here.",
+        )
+        if st.button("Stage ZIP Folder", use_container_width=True):
+            staged_dir, staged_pid, ok_count, bad_count, err = stage_dicom_zip(
+                uploaded_zip, upload_patient_id)
+            if staged_dir and staged_pid:
+                st.session_state["uploaded_data_dir"] = staged_dir
+                st.session_state["uploaded_patient_id"] = staged_pid
+                st.success(f"Staged {ok_count} DICOM file(s) for '{staged_pid}'.")
+                if bad_count:
+                    st.warning(f"Skipped {bad_count} non-DICOM file(s).")
+            else:
+                st.error(err or "Could not stage ZIP folder.")
+        active_data_dir = st.session_state.get("uploaded_data_dir", "")
+
     staged_pid = st.session_state.get("uploaded_patient_id")
     if staged_pid:
         st.caption(f"Staged patient: {staged_pid}")
     if active_data_dir:
-        st.caption(f"Staged dataset: {active_data_dir}")
+        st.caption(f"Data dir: {active_data_dir}")
 
     all_patients = discover_all_patients(active_format, active_data_dir)
     staged_pid = st.session_state.get("uploaded_patient_id")
@@ -549,10 +586,19 @@ with st.sidebar:
     processed = find_processed_patients()
 
     if not all_patients:
-        st.warning("No staged DICOM patients available for processing.")
-        if active_data_dir:
-            st.code(f"Staged data dir: {os.path.abspath(active_data_dir)}")
+        if input_mode == "📁 Local Directory (BraTS / NIfTI)":
+            st.warning("No patients found in that directory.")
+            st.info(
+                "For BraTS 2020, the path should contain folders named "
+                "like `BraTS20_Training_001`. "
+                "Click **Use This Directory** after setting the path."
+            )
+        else:
+            st.warning("No staged DICOM patients available for processing.")
+            if active_data_dir:
+                st.code(f"Staged data dir: {os.path.abspath(active_data_dir)}")
         st.stop()
+
 
     # Build display labels showing status
     labels = []
