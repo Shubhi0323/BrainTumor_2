@@ -1,16 +1,7 @@
 """
 Brain Tumor Analysis Dashboard
 ================================
-Streamlit UI for visualising pipeline outputs.
-
-Fixes applied (2026-06-10):
-  - Removed unused stage_uploaded_dicoms(), INPUT_FORMAT constant, is_processed()
-  - Fixed discover_all_patients() to support NIfTI/BraTS (was DICOM-only)
-  - Fixed render_image_safe() invalid width="stretch" argument
-  - Moved _label() helper to module level (was re-defined inside sidebar loop)
-  - Removed redundant job/job_status re-fetch after sidebar block
-  - Removed unused col_r variable in Processing Status tab
-  - Added "no jobs yet" message in Processing Status tab
+Streamlit UI for visualizing pipeline outputs.
 """
 import os
 import re
@@ -33,7 +24,8 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-# Allow large images (segmentation overlays) without decompression-bomb errors.
+# Output images are generated locally by this app; allow large images to render
+# instead of triggering PIL decompression-bomb protection.
 Image.MAX_IMAGE_PIXELS = None
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 warnings.filterwarnings("ignore", category=Image.DecompressionBombWarning)
@@ -46,7 +38,7 @@ os.makedirs(JOBS_DIR, exist_ok=True)
 os.makedirs(UPLOADS_DIR, exist_ok=True)
 
 
-# ── Job tracking ──────────────────────────────────────────────
+# ── Job tracking ─────────────────────────────────────────────
 def job_path(patient_id):
     return os.path.join(JOBS_DIR, f"{patient_id}.json")
 
@@ -60,29 +52,11 @@ def get_job_status(patient_id):
 
 
 def set_job_status(patient_id, status, **extra):
-    data = {
-        "patient_id": patient_id,
-        "status": status,
-        "updated_at": datetime.now().isoformat(),
-        **extra,
-    }
+    data = {"patient_id": patient_id, "status": status, "updated_at": datetime.now().isoformat(), **extra}
     with open(job_path(patient_id), "w") as f:
         json.dump(data, f)
 
 
-def get_all_jobs():
-    """Return all job records sorted by patient ID."""
-    jobs = []
-    for f in sorted(glob.glob(os.path.join(JOBS_DIR, "*.json"))):
-        try:
-            with open(f) as fh:
-                jobs.append(json.load(fh))
-        except Exception:
-            pass
-    return jobs
-
-
-# ── HITL review persistence ────────────────────────────────────
 def load_hitl_reviews():
     if os.path.exists(HITL_REVIEWS_PATH):
         try:
@@ -112,59 +86,90 @@ def save_hitl_review(patient_id, reviewer, approved, notes):
         json.dump(reviews, f, indent=2)
 
 
-# ── Pipeline launcher ──────────────────────────────────────────
-def start_pipeline_job(patient_id, data_dir, input_format="nifti"):
-    """Launch main.py as a detached background process."""
+def start_pipeline_job(patient_id, data_dir, input_format="dicom"):
+    """Launch pipeline as a background process."""
     run_data_dir = (data_dir or "").strip()
-    run_fmt = (input_format or "nifti").lower()
+    run_input_format = (input_format or "dicom").lower()
     if not run_data_dir or not os.path.isdir(run_data_dir):
         print(f"[ERROR] Invalid data directory for {patient_id}: {run_data_dir}")
         return False
 
     log_path = os.path.join(JOBS_DIR, f"{patient_id}.log")
+    set_job_status(patient_id, "running", started_at=datetime.now().isoformat(),
+                   log_file=log_path, data_dir=run_data_dir, input_format=run_input_format)
     main_py = os.path.join(PROJECT_ROOT, "main.py")
     run_env = os.environ.copy()
-    existing_pp = run_env.get("PYTHONPATH", "")
-    run_env["PYTHONPATH"] = (
-        PROJECT_ROOT if not existing_pp else f"{PROJECT_ROOT}:{existing_pp}"
-    )
-
+    existing_pythonpath = run_env.get("PYTHONPATH", "")
+    run_env["PYTHONPATH"] = PROJECT_ROOT if not existing_pythonpath else f"{PROJECT_ROOT}:{existing_pythonpath}"
     with open(log_path, "w") as log_file:
         proc = subprocess.Popen(
             [
                 "python", main_py,
                 "--data_dir", run_data_dir,
-                "--format", run_fmt,
+                "--format", run_input_format,
                 "--phase", "all",
                 "--output_dir", OUTPUT_DIR,
                 "--skip_hitl",
                 "--patient_id", patient_id,
             ],
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
+            stdout=log_file, stderr=subprocess.STDOUT,
             cwd=PROJECT_ROOT,
             env=run_env,
         )
-
-    set_job_status(
-        patient_id, "running",
-        started_at=datetime.now().isoformat(),
-        log_file=log_path,
-        pid=proc.pid,
-        data_dir=run_data_dir,
-        input_format=run_fmt,
-    )
+    # Store PID for process liveness checking
+    set_job_status(patient_id, "running",
+                   started_at=datetime.now().isoformat(),
+                   log_file=log_path, pid=proc.pid,
+                   data_dir=run_data_dir, input_format=run_input_format)
     return True
 
 
-# ── DICOM ZIP staging ─────────────────────────────────────────
 def _safe_token(text):
     token = re.sub(r"[^A-Za-z0-9._-]+", "_", (text or "").strip())
     return token.strip("._-") or "uploaded_patient"
 
 
+def stage_uploaded_dicoms(uploaded_files, patient_id):
+    """Persist uploaded DICOM files into a temporary dataset layout."""
+    if not uploaded_files:
+        return None, None, 0, 0
+
+    normalized_patient = _safe_token(patient_id)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    data_root = os.path.join(UPLOADS_DIR, f"session_{stamp}")
+    patient_root = os.path.join(data_root, normalized_patient)
+
+    valid_count = 0
+    invalid_count = 0
+    for idx, up in enumerate(uploaded_files, start=1):
+        blob = up.getvalue()
+        try:
+            ds = pydicom.dcmread(io.BytesIO(blob), stop_before_pixels=True, force=True)
+            series_uid = _safe_token(str(getattr(ds, "SeriesInstanceUID", "series_unknown")))
+            instance_no = getattr(ds, "InstanceNumber", idx)
+            series_dir = os.path.join(patient_root, f"series_{series_uid}")
+            os.makedirs(series_dir, exist_ok=True)
+
+            orig_name = _safe_token(os.path.basename(up.name))
+            try:
+                instance_token = f"{int(instance_no):05d}"
+            except Exception:
+                instance_token = f"{idx:05d}"
+            fname = f"{instance_token}_{orig_name}.dcm"
+            with open(os.path.join(series_dir, fname), "wb") as f:
+                f.write(blob)
+            valid_count += 1
+        except Exception:
+            invalid_count += 1
+
+    if valid_count == 0:
+        return None, None, 0, invalid_count
+
+    return data_root, normalized_patient, valid_count, invalid_count
+
+
 def stage_dicom_zip(uploaded_zip, patient_id):
-    """Extract and stage all readable DICOM files from an uploaded ZIP."""
+    """Stage all readable DICOM files from an uploaded ZIP folder export."""
     if uploaded_zip is None:
         return None, None, 0, 0, "Please upload a ZIP file first."
 
@@ -173,13 +178,13 @@ def stage_dicom_zip(uploaded_zip, patient_id):
     data_root = os.path.join(UPLOADS_DIR, f"session_{stamp}")
     patient_root = os.path.join(data_root, normalized_patient)
 
+    valid_count = 0
+    invalid_count = 0
     try:
         zf = zipfile.ZipFile(io.BytesIO(uploaded_zip.getvalue()))
     except Exception:
         return None, None, 0, 0, "Uploaded file is not a valid ZIP archive."
 
-    valid_count = 0
-    invalid_count = 0
     for idx, member in enumerate(sorted(zf.namelist()), start=1):
         if member.endswith("/"):
             continue
@@ -187,20 +192,23 @@ def stage_dicom_zip(uploaded_zip, patient_id):
             blob = zf.read(member)
             if not blob:
                 continue
+
             ds = pydicom.dcmread(io.BytesIO(blob), stop_before_pixels=True, force=True)
-            series_uid  = _safe_token(str(getattr(ds, "SeriesInstanceUID", "series_unknown")))
-            member_dir  = os.path.dirname(member).strip()
+            series_uid = _safe_token(str(getattr(ds, "SeriesInstanceUID", "series_unknown")))
+            member_dir = os.path.dirname(member).strip()
             series_hint = _safe_token(os.path.basename(member_dir)) if member_dir else ""
             instance_no = getattr(ds, "InstanceNumber", idx)
             series_name = f"series_{series_hint}_{series_uid}" if series_hint else f"series_{series_uid}"
-            series_dir  = os.path.join(patient_root, series_name)
+            series_dir = os.path.join(patient_root, series_name)
             os.makedirs(series_dir, exist_ok=True)
+
             orig_name = _safe_token(os.path.basename(member))
             try:
                 instance_token = f"{int(instance_no):05d}"
             except Exception:
                 instance_token = f"{idx:05d}"
-            with open(os.path.join(series_dir, f"{instance_token}_{orig_name}.dcm"), "wb") as f:
+            dst_path = os.path.join(series_dir, f"{instance_token}_{orig_name}.dcm")
+            with open(dst_path, "wb") as f:
                 f.write(blob)
             valid_count += 1
         except Exception:
@@ -208,11 +216,12 @@ def stage_dicom_zip(uploaded_zip, patient_id):
 
     if valid_count == 0:
         return None, None, 0, invalid_count, "No readable DICOM files found in ZIP."
+
     return data_root, normalized_patient, valid_count, invalid_count, ""
 
 
-# ── Process liveness check ────────────────────────────────────
 def _is_pid_alive(pid):
+    """Check if a process with given PID is still running."""
     if pid is None:
         return False
     try:
@@ -223,107 +232,144 @@ def _is_pid_alive(pid):
 
 
 def check_running_jobs():
-    """Update job statuses: detect completion or crash of running jobs."""
-    for fpath in glob.glob(os.path.join(JOBS_DIR, "*.json")):
+    """Check if running jobs have completed by looking for output files or process exit."""
+    for f in glob.glob(os.path.join(JOBS_DIR, "*.json")):
         try:
-            with open(fpath) as fh:
+            with open(f) as fh:
                 job = json.load(fh)
         except Exception:
             continue
-
         source_meta = {
             "data_dir": job.get("data_dir", ""),
-            "input_format": job.get("input_format", "nifti"),
+            "input_format": job.get("input_format", "dicom"),
         }
-        status      = job.get("status", "")
-        patient_id  = job.get("patient_id", "")
-        log_path    = job.get("log_file", "")
-        proc_pid    = job.get("pid")
-        report_path = os.path.join(OUTPUT_DIR, "reports", f"{patient_id}_report.json")
+        status = job.get("status", "")
+        pid_val = job.get("patient_id", "")
+        log_path = job.get("log_file", "")
+        proc_pid = job.get("pid")
+        report_path = os.path.join(OUTPUT_DIR, "reports", f"{pid_val}_report.json")
 
-        # Auto-recover: status=failed but report now exists
+        # Recovery: if status is "failed" but report now exists, fix the status
         if status == "failed" and os.path.exists(report_path):
             report = load_json(report_path)
-            errors = (report or {}).get("pipeline_errors", [])
-            has_errors = (report or {}).get("report_metadata", {}).get("has_errors", False)
-            new_status = "completed_with_errors" if (has_errors or errors) else "completed"
-            set_job_status(patient_id, new_status,
-                           started_at=job.get("started_at"),
-                           finished_at=datetime.now().isoformat(),
-                           log_file=log_path, errors=errors, **source_meta)
+            has_errors = report.get("report_metadata", {}).get("has_errors", False) if report else False
+            errors = report.get("pipeline_errors", []) if report else []
+            if has_errors or errors:
+                set_job_status(pid_val, "completed_with_errors",
+                               started_at=job.get("started_at"),
+                               finished_at=datetime.now().isoformat(),
+                               log_file=log_path, errors=errors, **source_meta)
+            else:
+                set_job_status(pid_val, "completed",
+                               started_at=job.get("started_at"),
+                               finished_at=datetime.now().isoformat(),
+                               log_file=log_path, **source_meta)
             continue
 
         if status != "running":
             continue
 
+        # Check if report was generated (pipeline completed)
         if os.path.exists(report_path):
             report = load_json(report_path)
-            errors = (report or {}).get("pipeline_errors", [])
-            has_errors = (report or {}).get("report_metadata", {}).get("has_errors", False)
-            new_status = "completed_with_errors" if (has_errors or errors) else "completed"
-            set_job_status(patient_id, new_status,
-                           started_at=job.get("started_at"),
-                           finished_at=datetime.now().isoformat(),
-                           log_file=log_path, errors=errors, **source_meta)
-        elif proc_pid and not _is_pid_alive(proc_pid):
-            set_job_status(patient_id, "failed",
-                           started_at=job.get("started_at"),
-                           finished_at=datetime.now().isoformat(),
-                           log_file=log_path, **source_meta)
-        elif log_path and os.path.exists(log_path):
-            if time.time() - os.path.getmtime(log_path) > 600:
-                set_job_status(patient_id, "failed",
+            has_errors = report.get("report_metadata", {}).get("has_errors", False) if report else False
+            errors = report.get("pipeline_errors", []) if report else []
+            if has_errors or errors:
+                set_job_status(pid_val, "completed_with_errors",
                                started_at=job.get("started_at"),
                                finished_at=datetime.now().isoformat(),
-                               log_file=log_path, **source_meta)
+                               log_file=log_path,
+                               errors=errors,
+                               **source_meta)
+            else:
+                set_job_status(pid_val, "completed",
+                               started_at=job.get("started_at"),
+                               finished_at=datetime.now().isoformat(),
+                               log_file=log_path,
+                               **source_meta)
+        elif proc_pid and not _is_pid_alive(proc_pid):
+            # Process exited without producing a report = failed
+            set_job_status(pid_val, "failed",
+                           started_at=job.get("started_at"),
+                           finished_at=datetime.now().isoformat(),
+                           log_file=log_path,
+                           **source_meta)
+        elif log_path and os.path.exists(log_path):
+            # Fallback: check log staleness (no PID available)
+            mtime = os.path.getmtime(log_path)
+            if time.time() - mtime > 600:
+                # Log hasn't been updated in 10 min — likely failed
+                set_job_status(pid_val, "failed",
+                               started_at=job.get("started_at"),
+                               finished_at=datetime.now().isoformat(),
+                               log_file=log_path,
+                               **source_meta)
 
 
-# ── Patient / data discovery ───────────────────────────────────
+def get_all_jobs():
+    """Return all job statuses."""
+    jobs = []
+    for f in sorted(glob.glob(os.path.join(JOBS_DIR, "*.json"))):
+        try:
+            with open(f) as fh:
+                jobs.append(json.load(fh))
+        except Exception:
+            pass
+    return jobs
+
+
 def discover_all_patients(format_name, data_dir):
-    """Discover patient IDs from a dataset directory.
+    """Discover all patients from the selected input format.
 
-    - NIfTI/BraTS: each immediate sub-folder is a patient.
-    - DICOM: uses dicom_adapter; falls back to sub-folder scan.
+    Supports both NIfTI/BraTS directories (sub-folder per patient) and
+    DICOM directories (via dicom_adapter with sub-folder fallback).
     """
-    if not data_dir or not os.path.isdir(data_dir):
-        return []
-
     patients = set()
 
+    if not data_dir or not os.path.isdir(data_dir):
+        return sorted(patients)
+
     if format_name == "nifti":
+        # BraTS: each immediate sub-folder is a patient
         for name in sorted(os.listdir(data_dir)):
             if os.path.isdir(os.path.join(data_dir, name)) and not name.startswith("."):
                 patients.add(name)
-    else:  # dicom
+    else:
+        # DICOM: try adapter first, fall back to sub-folder scan
         try:
             from utils.dicom_adapter import discover_dicom_series
             discovered = discover_dicom_series(data_dir)
             patients.update(discovered.keys())
         except Exception as e:
             print(f"[WARNING] DICOM discovery failed: {e}")
+
+        # Fallback for staged uploads: include patient folders even when
+        # modality inference cannot classify all series yet.
         if not patients:
             for name in sorted(os.listdir(data_dir)):
-                if os.path.isdir(os.path.join(data_dir, name)) and not name.startswith("."):
+                full = os.path.join(data_dir, name)
+                if os.path.isdir(full) and not name.startswith("."):
                     patients.add(name)
 
     return sorted(patients)
 
 
 def find_processed_patients():
-    """Return set of patient IDs that have at least one pipeline output file."""
+    """Find patients that have pipeline outputs."""
     processed = set()
-    suffixes = {
-        "_report.json": os.path.join(OUTPUT_DIR, "reports"),
-        "_clinical.json": os.path.join(OUTPUT_DIR, "clinical_features"),
-        "_radiomics.json": os.path.join(OUTPUT_DIR, "radiomics"),
-    }
-    for suffix, folder in suffixes.items():
-        for f in glob.glob(os.path.join(folder, f"*{suffix}")):
-            processed.add(os.path.basename(f).replace(suffix, ""))
+    for pattern_path in [
+        os.path.join(OUTPUT_DIR, "reports", "*_report.json"),
+        os.path.join(OUTPUT_DIR, "clinical_features", "*_clinical.json"),
+        os.path.join(OUTPUT_DIR, "radiomics", "*_radiomics.json"),
+    ]:
+        for f in glob.glob(pattern_path):
+            name = os.path.basename(f)
+            for suffix in ("_report.json", "_clinical.json", "_radiomics.json"):
+                if name.endswith(suffix):
+                    processed.add(name.replace(suffix, ""))
     return processed
 
 
-# ── Data loaders ───────────────────────────────────────────────
 def load_json(path):
     if os.path.exists(path):
         try:
@@ -356,41 +402,13 @@ def get_viz_images(patient_id):
     if os.path.isdir(viz_dir):
         for f in sorted(os.listdir(viz_dir)):
             if f.endswith(".png"):
-                label = (
-                    f.replace(f"{patient_id}_", "")
-                     .replace(".png", "")
-                     .replace("_", " ")
-                     .title()
-                )
+                label = f.replace(f"{patient_id}_", "").replace(".png", "").replace("_", " ").title()
                 images[label] = os.path.join(viz_dir, f)
     return images
 
 
-def get_patient_modalities(data_dir, patient_id):
-    """Return {modality: (found, filename)} for a BraTS NIfTI patient folder."""
-    MODALITY_PATTERNS = {
-        "T1":    ["_t1.nii.gz",    "_t1.nii"],
-        "T1ce":  ["_t1ce.nii.gz",  "_t1ce.nii"],
-        "T2":    ["_t2.nii.gz",    "_t2.nii"],
-        "FLAIR": ["_flair.nii.gz", "_flair.nii"],
-        "Seg":   ["_seg.nii.gz",   "_seg.nii"],
-    }
-    patient_dir = os.path.join(data_dir, patient_id) if data_dir else ""
-    result = {}
-    for mod, patterns in MODALITY_PATTERNS.items():
-        found_name = ""
-        if patient_dir and os.path.isdir(patient_dir):
-            for fname in os.listdir(patient_dir):
-                if any(fname.endswith(p) for p in patterns):
-                    found_name = fname
-                    break
-        result[mod] = (bool(found_name), found_name)
-    return result, patient_dir
-
-
-# ── Rendering helpers ─────────────────────────────────────────
 def render_image_safe(path):
-    """Display an image without crashing if PIL refuses to load it."""
+    """Render image without crashing the page on PIL size guard errors."""
     try:
         st.image(path, use_container_width=True)
     except Exception as e:
@@ -420,6 +438,7 @@ def render_hitl_review_form(patient_id):
             save_hitl_review(patient_id, reviewer, approved, notes)
             st.success("Final review saved.")
             st.rerun()
+
         if review:
             status = "Approved" if review.get("approved") else "Pending approval"
             updated = review.get("updated_at", "")[:19]
@@ -427,65 +446,15 @@ def render_hitl_review_form(patient_id):
             st.caption(f"Latest review: {status} · Reviewer: {reviewer_name} · Updated: {updated}")
 
 
-# ── Display helpers ───────────────────────────────────────────
-def severity_badge(severity):
-    colors = {
-        "small":      "badge-green",
-        "medium":     "badge-yellow",
-        "large":      "badge-red",
-        "very_large": "badge-red",
-    }
-    cls = colors.get(severity, "badge-blue")
-    return f'<span class="status-badge {cls}">{severity.upper()}</span>'
-
-
-def rano_badge(assessment):
-    colors = {"CR": "badge-green", "PR": "badge-blue", "SD": "badge-yellow", "PD": "badge-red"}
-    names  = {
-        "CR": "Complete Response",
-        "PR": "Partial Response",
-        "SD": "Stable Disease",
-        "PD": "Progressive Disease",
-    }
-    cls  = colors.get(assessment, "badge-blue")
-    name = names.get(assessment, assessment)
-    return f'<span class="status-badge {cls}">{assessment} — {name}</span>'
-
-
-def metric_card(title, value):
-    return (
-        f'<div class="metric-card">'
-        f'<h3>{title}</h3>'
-        f'<p>{value}</p>'
-        f'</div>'
-    )
-
-
-def _patient_label(pid, processed, all_jobs_by_pid):
-    """Return a status-emoji-prefixed label for the patient dropdown."""
-    job = all_jobs_by_pid.get(pid)
-    job_status = job.get("status") if job else None
-    if pid in processed and job_status == "completed_with_errors":
-        return f"⚠️ {pid}"
-    if pid in processed:
-        return f"✅ {pid}"
-    if job_status == "running":
-        return f"⏳ {pid}"
-    if job_status == "failed":
-        return f"❌ {pid}"
-    return f"○  {pid}"
-
-
-# ══════════════════════════════════════════════════════════════
-# PAGE CONFIG & CSS
-# ══════════════════════════════════════════════════════════════
+# ── Page config ──────────────────────────────────────────────
 st.set_page_config(
-    page_title="NeuroAgent — Brain Tumor Analysis",
+    page_title="Brain Tumor Analysis",
     page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
+# ── Custom CSS ───────────────────────────────────────────────
 st.markdown("""
 <style>
     .metric-card {
@@ -514,265 +483,273 @@ st.markdown("""
         font-size: 0.8rem;
         font-weight: 600;
     }
-    .badge-green  { background: #1a4d2e; color: #4ade80; }
+    .badge-green { background: #1a4d2e; color: #4ade80; }
     .badge-yellow { background: #4d3d1a; color: #facc15; }
-    .badge-red    { background: #4d1a1a; color: #f87171; }
-    .badge-blue   { background: #1a2d4d; color: #60a5fa; }
+    .badge-red { background: #4d1a1a; color: #f87171; }
+    .badge-blue { background: #1a2d4d; color: #60a5fa; }
+    .section-header {
+        border-bottom: 2px solid #3d3d5c;
+        padding-bottom: 0.5rem;
+        margin-bottom: 1rem;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 
-# ══════════════════════════════════════════════════════════════
-# SIDEBAR
-# ══════════════════════════════════════════════════════════════
+def severity_badge(severity):
+    colors = {
+        "small": "badge-green",
+        "medium": "badge-yellow",
+        "large": "badge-red",
+        "very_large": "badge-red",
+    }
+    cls = colors.get(severity, "badge-blue")
+    return f'<span class="status-badge {cls}">{severity.upper()}</span>'
+
+
+def rano_badge(assessment):
+    colors = {
+        "CR": "badge-green",
+        "PR": "badge-blue",
+        "SD": "badge-yellow",
+        "PD": "badge-red",
+    }
+    cls = colors.get(assessment, "badge-blue")
+    names = {"CR": "Complete Response", "PR": "Partial Response", "SD": "Stable Disease", "PD": "Progressive Disease"}
+    name = names.get(assessment, assessment)
+    return f'<span class="status-badge {cls}">{assessment} — {name}</span>'
+
+
+def metric_card(title, value):
+    return f'<div class="metric-card"><h3>{title}</h3><p>{value}</p></div>'
+
+
+# ── Sidebar ──────────────────────────────────────────────────
+# Check running jobs on every page load
 check_running_jobs()
 
 with st.sidebar:
-    st.markdown("## 🧠 NeuroAgent")
+    st.markdown("## 🧠 Brain Tumor Analysis")
     st.markdown("---")
 
-    # ── Three-tab data source ─────────────────────────────────
-    # Tab 1: BraTS / NIfTI local directory
-    # Tab 2: DICOM local directory
-    # Tab 3: DICOM ZIP upload (for Colab / remote)
-    brats_tab, dicom_tab, zip_tab = st.tabs([
-        "🧬 BraTS (NIfTI)",
-        "🗂️ DICOM Dir",
-        "📤 Upload ZIP",
-    ])
+    # ── Data source tabs ─────────────────────────────────────
+    brats_tab, dicom_tab, zip_tab = st.tabs(["🧬 BraTS", "🗂️ DICOM Dir", "📤 Upload ZIP"])
 
     with brats_tab:
         default_dir = os.environ.get("DATA_DIR", "")
-        brats_dir_input = st.text_input(
+        brats_path = st.text_input(
             "BraTS dataset path",
             value=st.session_state.get("brats_dir", default_dir),
             key="brats_dir_widget",
-            help=(
-                "Path to folder containing BraTS20_Training_XXX sub-folders. "
-                "Each sub-folder = one patient (NIfTI format)."
-            ),
+            help="Folder containing BraTS20_Training_XXX sub-folders (NIfTI format).",
         )
         col_a, col_b = st.columns(2)
         with col_a:
             if st.button("📂 Load", use_container_width=True, key="load_brats"):
-                if brats_dir_input and os.path.isdir(brats_dir_input):
-                    # Count sub-folders so we can warn immediately if empty
+                if brats_path and os.path.isdir(brats_path):
                     sub_dirs = [
-                        n for n in os.listdir(brats_dir_input)
-                        if os.path.isdir(os.path.join(brats_dir_input, n))
-                        and not n.startswith(".")
+                        n for n in os.listdir(brats_path)
+                        if os.path.isdir(os.path.join(brats_path, n)) and not n.startswith(".")
                     ]
                     if sub_dirs:
-                        st.session_state["active_data_dir"] = brats_dir_input
-                        st.session_state["active_format"]   = "nifti"
-                        st.session_state["brats_dir"]       = brats_dir_input
-                        st.session_state.pop("staged_patient_id", None)
+                        st.session_state["uploaded_data_dir"] = brats_path
+                        st.session_state["active_format"] = "nifti"
+                        st.session_state["brats_dir"] = brats_path
+                        st.session_state.pop("uploaded_patient_id", None)
                         st.rerun()
                     else:
-                        st.error(
-                            "No patient sub-folders found in that directory. "
-                            "Expected folders like `BraTS20_Training_001`."
-                        )
+                        st.error("No patient sub-folders found. Expected folders like `BraTS20_Training_001`.")
                 else:
                     st.error("Directory not found.")
         with col_b:
             if st.button("🔄 Reset", use_container_width=True, key="reset_brats"):
-                for k in ["active_data_dir", "active_format", "brats_dir", "staged_patient_id"]:
+                for k in ["uploaded_data_dir", "active_format", "brats_dir", "uploaded_patient_id"]:
                     st.session_state.pop(k, None)
                 st.rerun()
-
-        # Auto-tip when DATA_DIR env var is set
-        if default_dir and not st.session_state.get("active_data_dir"):
-            st.info(
-                f"DATA_DIR env detected:\n`{default_dir}`\n\n"
-                "Click **Load** to use it."
-            )
+        if default_dir and not st.session_state.get("uploaded_data_dir"):
+            st.info(f"DATA_DIR detected:\n`{default_dir}`\n\nClick **Load** to use it.")
 
     with dicom_tab:
-        dicom_dir_input = st.text_input(
+        dicom_path = st.text_input(
             "DICOM dataset path",
             value=st.session_state.get("dicom_dir", ""),
             key="dicom_dir_widget",
-            help=(
-                "Path to a folder containing patient sub-folders of DICOM (.dcm) files. "
-                "Each immediate sub-folder = one patient."
-            ),
+            help="Folder containing patient sub-folders of .dcm files.",
         )
         col_c, col_d = st.columns(2)
         with col_c:
             if st.button("📂 Load", use_container_width=True, key="load_dicom"):
-                if dicom_dir_input and os.path.isdir(dicom_dir_input):
+                if dicom_path and os.path.isdir(dicom_path):
                     sub_dirs = [
-                        n for n in os.listdir(dicom_dir_input)
-                        if os.path.isdir(os.path.join(dicom_dir_input, n))
-                        and not n.startswith(".")
+                        n for n in os.listdir(dicom_path)
+                        if os.path.isdir(os.path.join(dicom_path, n)) and not n.startswith(".")
                     ]
                     if sub_dirs:
-                        st.session_state["active_data_dir"] = dicom_dir_input
-                        st.session_state["active_format"]   = "dicom"
-                        st.session_state["dicom_dir"]       = dicom_dir_input
-                        st.session_state.pop("staged_patient_id", None)
+                        st.session_state["uploaded_data_dir"] = dicom_path
+                        st.session_state["active_format"] = "dicom"
+                        st.session_state["dicom_dir"] = dicom_path
+                        st.session_state.pop("uploaded_patient_id", None)
                         st.rerun()
                     else:
-                        st.error(
-                            "No patient sub-folders found. "
-                            "Each patient should be a sub-folder containing .dcm files."
-                        )
+                        st.error("No patient sub-folders found.")
                 else:
                     st.error("Directory not found.")
         with col_d:
             if st.button("🔄 Reset", use_container_width=True, key="reset_dicom"):
-                for k in ["active_data_dir", "active_format", "dicom_dir", "staged_patient_id"]:
+                for k in ["uploaded_data_dir", "active_format", "dicom_dir", "uploaded_patient_id"]:
                     st.session_state.pop(k, None)
                 st.rerun()
 
     with zip_tab:
         st.caption("Upload a single patient's DICOM folder as a ZIP file.")
-        upload_patient_id = st.text_input(
-            "Patient ID", value="uploaded_patient", key="upload_pid"
-        )
+        upload_patient_id = st.text_input("Patient ID", value="uploaded_patient")
         uploaded_zip = st.file_uploader(
-            "DICOM folder (ZIP)",
+            "Or upload patient folder as ZIP",
             type=["zip"],
-            key="zip_upload",
-            help="Zip your DICOM series folder and upload here.",
+            accept_multiple_files=False,
+            help="Export or zip your local patient DICOM folder and upload it here.",
         )
-        if st.button("Stage ZIP", use_container_width=True, key="stage_zip"):
-            staged_dir, staged_pid, ok, bad, err = stage_dicom_zip(
-                uploaded_zip, upload_patient_id
-            )
+        if st.button("Stage ZIP Folder", use_container_width=True):
+            staged_dir, staged_pid, ok_count, bad_count, err = stage_dicom_zip(uploaded_zip, upload_patient_id)
             if staged_dir and staged_pid:
-                st.session_state["active_data_dir"]   = staged_dir
-                st.session_state["active_format"]     = "dicom"
-                st.session_state["staged_patient_id"] = staged_pid
-                st.success(f"Staged {ok} DICOM file(s).")
-                if bad:
-                    st.warning(f"Skipped {bad} non-DICOM file(s).")
+                st.session_state["uploaded_data_dir"] = staged_dir
+                st.session_state["uploaded_patient_id"] = staged_pid
+                st.session_state["active_format"] = "dicom"
+                st.success(f"Staged {ok_count} DICOM file(s) from ZIP for patient '{staged_pid}'.")
+                if bad_count:
+                    st.warning(f"Skipped {bad_count} non-DICOM or unreadable file(s).")
                 st.rerun()
             else:
-                st.error(err or "Could not stage ZIP.")
+                st.error(err or "Could not stage ZIP folder.")
 
-    # ── Resolve active settings ──────────────────────────────
-    active_data_dir = st.session_state.get("active_data_dir", "")
-    active_format   = st.session_state.get("active_format", "nifti")
-    st.markdown("---")
+    # ── Resolve active data source ────────────────────────────
+    active_data_dir = st.session_state.get("uploaded_data_dir", "")
+    active_format   = st.session_state.get("active_format", "dicom")
+    staged_pid_single = st.session_state.get("uploaded_patient_id")
+    if staged_pid_single:
+        st.caption(f"Staged patient: {staged_pid_single}")
+    if active_data_dir:
+        st.caption(f"Dataset: {active_data_dir}")
 
-    # ── Patient discovery ────────────────────────────────────
     all_patients = discover_all_patients(active_format, active_data_dir)
-    staged_pid   = st.session_state.get("staged_patient_id")
-    if staged_pid and staged_pid not in all_patients:
-        all_patients = sorted(set(all_patients + [staged_pid]))
+    if staged_pid_single and staged_pid_single not in all_patients:
+        all_patients = sorted(set(all_patients + [staged_pid_single]))
     processed = find_processed_patients()
 
     if not all_patients:
+        st.warning("No patients found. Load a dataset or upload a ZIP above.")
         if active_data_dir:
-            st.warning("No patients found in that directory.")
-            if active_format == "nifti":
-                st.info(
-                    "Expected BraTS sub-folder names like `BraTS20_Training_001`.\n\n"
-                    "Make sure you selected the **training root folder** "
-                    "(the one that contains the patient folders), not a patient folder itself."
-                )
-            else:
-                st.info(
-                    "Each patient must be an immediate sub-folder containing `.dcm` files.\n\n"
-                    "If you have a single patient ZIP, use the **Upload ZIP** tab instead."
-                )
-        else:
-            st.info(
-                "Pick a data source above:\n"
-                "- **BraTS (NIfTI)** — local BraTS2020 dataset\n"
-                "- **DICOM Dir** — local folder of DICOM patients\n"
-                "- **Upload ZIP** — upload a single patient's DICOM ZIP"
-            )
+            st.code(f"Dataset dir: {os.path.abspath(active_data_dir)}")
         st.stop()
 
-    # ── Searchable patient selector ──────────────────────────
-    search_term = st.text_input(
-        "🔍 Search patient", placeholder="Type to filter…", key="patient_search"
-    )
-    filtered = (
+    # ── Search ────────────────────────────────────────────────
+    search_term = st.text_input("🔍 Search patient", placeholder="Type to filter…", key="patient_search")
+    filtered_patients = (
         [p for p in all_patients if search_term.lower() in p.lower()]
         if search_term else all_patients
     )
-    if not filtered:
+    if not filtered_patients:
         st.warning("No patients match the search.")
         st.stop()
 
-    # Build label list (single pass over jobs dict for efficiency)
-    all_jobs_by_pid = {j["patient_id"]: j for j in get_all_jobs() if "patient_id" in j}
-    labels = [_patient_label(p, processed, all_jobs_by_pid) for p in filtered]
+    # Build display labels showing status
+    labels = []
+    for pid in filtered_patients:
+        job = get_job_status(pid)
+        if pid in processed and job and job.get("status") == "completed_with_errors":
+            labels.append(f"⚠️ {pid}")
+        elif pid in processed:
+            labels.append(f"✅ {pid}")
+        elif job and job.get("status") == "running":
+            labels.append(f"⏳ {pid}")
+        elif job and job.get("status") == "failed":
+            labels.append(f"❌ {pid}")
+        else:
+            labels.append(f"⬚ {pid}")
 
-    sel_label  = st.selectbox("Select Patient", labels, key="patient_selector")
-    patient_id = sel_label.split(" ", 1)[1].strip()
+    selected_label = st.selectbox("Select Patient", labels, key="patient_selector")
+    patient_id = selected_label.split(" ", 1)[1].strip()
 
-    running_count = sum(1 for j in all_jobs_by_pid.values() if j.get("status") == "running")
-    st.caption(
-        f"{len(processed)}/{len(all_patients)} processed"
-        + (f"  ·  {running_count} running" if running_count else "")
-    )
-
-    # ── Run / status controls ────────────────────────────────
+    running_count = sum(1 for j in get_all_jobs() if j.get("status") == "running")
+    st.caption(f"{len(processed)}/{len(all_patients)} processed" +
+               (f" · {running_count} running" if running_count else ""))
     st.markdown("---")
+
     patient_processed = patient_id in processed
-    job        = all_jobs_by_pid.get(patient_id)
+    job = get_job_status(patient_id)
     job_status = job.get("status") if job else None
 
+    # Processing controls
     if job_status == "running":
-        st.info("⏳ Analysis running…")
-        if st.button("🔄 Refresh", use_container_width=True, key="refresh_btn"):
+        st.info("⏳ Pipeline is running...")
+        if st.button("🔄 Refresh", use_container_width=True):
             st.rerun()
-
     elif job_status == "failed" and not patient_processed:
-        st.error("❌ Pipeline failed")
-        log_path = (job or {}).get("log_file", "")
+        st.error("Pipeline failed")
+        log_path = job.get("log_file", "") if job else ""
         if log_path and os.path.exists(log_path):
             with open(log_path) as lf:
-                last = "".join(lf.readlines()[-8:])
+                lines = lf.readlines()
+            last_lines = "".join(lines[-10:]) if lines else "No log output"
             with st.expander("Last log lines"):
-                st.code(last, language="text")
-        if st.button("🔄 Retry Analysis", type="primary", use_container_width=True, key="retry_btn"):
-            retry_dir = (job or {}).get("data_dir", active_data_dir)
-            retry_fmt = (job or {}).get("input_format", active_format)
-            if start_pipeline_job(patient_id, retry_dir, retry_fmt):
-                st.success("Restarted!")
+                st.code(last_lines, language="text")
+        if st.button("🔄 Retry Pipeline", type="primary", use_container_width=True):
+            retry_data_dir = (job or {}).get("data_dir", active_data_dir)
+            retry_format = (job or {}).get("input_format", active_format)
+            if start_pipeline_job(patient_id, retry_data_dir, retry_format):
+                st.success("Pipeline restarted!")
                 time.sleep(1)
                 st.rerun()
             else:
-                st.error("Cannot retry: data directory not available.")
-
+                st.error("Cannot restart: staged data directory not available.")
     elif not patient_processed:
-        if st.button("🚀 Run Analysis", type="primary", use_container_width=True, key="run_btn"):
+        st.warning("Not yet processed")
+        if st.button("🚀 Run Pipeline", type="primary", use_container_width=True):
             if active_data_dir and os.path.isdir(active_data_dir):
                 if start_pipeline_job(patient_id, active_data_dir, active_format):
-                    st.success("Analysis started!")
+                    st.success("Pipeline started in background!")
                     time.sleep(1)
                     st.rerun()
                 else:
                     st.error("Failed to start pipeline.")
             else:
-                st.error("Load a valid data directory first.")
+                st.error("Load a dataset or stage a ZIP first.")
     else:
-        report_meta = (load_report(patient_id) or {}).get("report_metadata", {})
-        if report_meta.get("has_errors", False):
-            st.warning("⚠️ Completed with errors")
-        else:
-            st.success("✅ Analysis complete")
-        st.caption(f"Generated: {report_meta.get('generated_at', '')[:19]}")
-        if st.button("🔄 Reprocess", use_container_width=True, key="reprocess_btn"):
+        # Processed patient — show info and reprocess option
+        report = load_report(patient_id)
+        if report:
+            meta = report.get("report_metadata", {})
+            st.markdown(f"**Generated:** {meta.get('generated_at', 'N/A')[:19]}")
+            st.markdown(f"**Pipeline:** v{meta.get('pipeline_version', '?')}")
+            has_errors = meta.get("has_errors", False)
+            errors = report.get("pipeline_errors", [])
+            if has_errors or errors:
+                st.error("Pipeline reported errors")
+            else:
+                st.success("Pipeline completed successfully")
+
+        if st.button("🔄 Reprocess Patient", use_container_width=True):
             if start_pipeline_job(patient_id, active_data_dir, active_format):
+                st.success("Reprocessing started in background!")
+                time.sleep(1)
                 st.rerun()
             else:
-                st.error("Cannot reprocess: data directory not available.")
+                st.error("Cannot reprocess: staged data directory not available.")
 
+    st.markdown("---")
+    st.markdown("### Navigation")
+    section = st.radio(
+        "Go to",
+        ["Overview", "MRI Visualization", "Radiomics", "Classification",
+         "Clinical Reasoning", "CAP Report", "Processing Status"],
+        label_visibility="collapsed",
+    )
 
-# ══════════════════════════════════════════════════════════════
-# LOAD PATIENT DATA
-# ══════════════════════════════════════════════════════════════
+# Load data for processed patients (needed outside sidebar)
 if patient_processed:
-    report    = load_report(patient_id)
-    cap       = load_cap(patient_id)
-    clinical  = load_clinical(patient_id)
+    report = load_report(patient_id)
+    cap = load_cap(patient_id)
+    clinical = load_clinical(patient_id)
     radiomics = load_radiomics(patient_id)
     viz_images = get_viz_images(patient_id)
 else:
@@ -780,474 +757,422 @@ else:
     viz_images = {}
 
 
-# ══════════════════════════════════════════════════════════════
-# MAIN CONTENT AREA
-# ══════════════════════════════════════════════════════════════
+# ── Overview ─────────────────────────────────────────────────
+if section == "Overview":
+    st.markdown("# Patient Overview")
 
-if not patient_processed:
-    # ── Pre-analysis states ───────────────────────────────────
-    if job_status == "running":
-        st.title(f"⏳ Analysing: {patient_id}")
-        st.info(
-            "The pipeline is running in the background. "
-            "This page auto-refreshes every 5 seconds."
-        )
-        st.progress(0.0, text="Pipeline running…")
-        log_path = (job or {}).get("log_file", "")
-        if log_path and os.path.exists(log_path):
-            with open(log_path) as lf:
-                lines = lf.readlines()
-            with st.expander("📋 Live Log (last 25 lines)", expanded=True):
-                st.code(
-                    "".join(lines[-25:]) if lines else "Waiting for output…",
-                    language="text",
-                )
-        time.sleep(5)
-        st.rerun()
+    if report:
+        tumor = report.get("tumor_summary", {})
+        morph = tumor.get("morphology", {})
+        who = report.get("who_classification", {})
+        rano = report.get("rano_assessment", {})
 
-    elif job_status == "failed":
-        st.title(f"❌ Analysis Failed: {patient_id}")
-        st.error(
-            "The pipeline exited with an error. "
-            "Check the log below, then click **Retry Analysis** in the sidebar."
-        )
-        log_path = (job or {}).get("log_file", "")
-        if log_path and os.path.exists(log_path):
-            with open(log_path) as lf:
-                content = lf.read()
-            with st.expander("📋 Full Error Log", expanded=True):
-                st.code(content[-4000:], language="text")
+        # Top metrics row
+        vol = morph.get('tumor_volume', 'N/A')
+        vol_str = f"{vol:,} mm³" if isinstance(vol, (int, float)) else f"{vol} mm³"
+        cols = st.columns(5)
+        with cols[0]:
+            st.markdown(metric_card("Volume", vol_str), unsafe_allow_html=True)
+        with cols[1]:
+            diam = morph.get('max_diameter', 0)
+            st.markdown(metric_card("Max Diameter", f"{float(diam):.1f} mm" if isinstance(diam, (int, float)) else str(diam)), unsafe_allow_html=True)
+        with cols[2]:
+            sph = morph.get('sphericity', 0)
+            st.markdown(metric_card("Sphericity", f"{float(sph):.3f}" if isinstance(sph, (int, float)) else str(sph)), unsafe_allow_html=True)
+        with cols[3]:
+            st.markdown(metric_card("WHO Grade", who.get("who_grade", "N/A")), unsafe_allow_html=True)
+        with cols[4]:
+            conf = who.get('confidence', 0)
+            st.markdown(metric_card("Confidence", f"{float(conf):.0%}" if isinstance(conf, (int, float)) else str(conf)), unsafe_allow_html=True)
 
-    else:
-        # ── Patient detail card ───────────────────────────────
-        st.title(f"🧬 {patient_id}")
-        st.caption(f"Format: {active_format.upper()}  ·  Directory: {active_data_dir}")
-        st.markdown("---")
+        st.markdown("")
 
-        st.markdown("### Available Modalities")
-        modalities, patient_dir = get_patient_modalities(active_data_dir, patient_id)
-        mod_cols = st.columns(len(modalities))
-        for i, (mod_name, (found, fname)) in enumerate(modalities.items()):
-            with mod_cols[i]:
-                if found:
-                    st.success(f"✅ **{mod_name}**")
-                    if fname:
-                        st.caption(fname)
-                else:
-                    st.error(f"❌ **{mod_name}**")
-                    st.caption("Not found")
-
-        st.markdown("---")
-        c1, c2 = st.columns([2, 1])
-        with c1:
-            st.markdown("### What the Pipeline Will Do")
-            for icon, phase, desc in [
-                ("🔬", "Phase 1 — Imaging",
-                 "N4 bias correction → SegResNet segmentation → PyRadiomics (214 features)"),
-                ("🧠", "Phase 2 — Intelligence",
-                 "WHO CNS5 classification → BioClinicalBERT embeddings → Similar case retrieval → Llama 3 reasoning"),
-                ("📋", "Phase 3 — Clinical",
-                 "RANO assessment → CAP structured report → Patient memory (ChromaDB)"),
-            ]:
-                st.markdown(f"**{icon} {phase}**")
-                st.caption(desc)
-                st.markdown("")
-
-        with c2:
-            st.markdown("### Folder Contents")
-            if patient_dir and os.path.isdir(patient_dir):
-                for fname in sorted(os.listdir(patient_dir)):
-                    fpath = os.path.join(patient_dir, fname)
-                    size_mb = os.path.getsize(fpath) / 1024 / 1024
-                    st.text(f"📄 {fname}  ({size_mb:.1f} MB)")
-            else:
-                st.warning("Patient folder not found.")
-
-        st.markdown("---")
-        st.info("👈 Click **🚀 Run Analysis** in the sidebar to start the pipeline.")
-
-else:
-    # ══════════════════════════════════════════════════════════
-    # RESULTS DASHBOARD
-    # ══════════════════════════════════════════════════════════
-    st.title(f"📊 Results: {patient_id}")
-
-    (tab_overview, tab_mri, tab_rad, tab_class,
-     tab_reason, tab_cap, tab_status) = st.tabs([
-        "📊 Overview",
-        "🧠 MRI Visualization",
-        "📈 Radiomics",
-        "🏷️ Classification",
-        "🩺 Clinical Reasoning",
-        "📄 CAP Report",
-        "⚙️ Processing Status",
-    ])
-
-    # ── Overview ──────────────────────────────────────────────
-    with tab_overview:
-        if report:
-            tumor = report.get("tumor_summary", {})
-            morph = tumor.get("morphology", {})
-            who   = report.get("who_classification", {})
-            rano  = report.get("rano_assessment", {})
-
-            vol     = morph.get("tumor_volume", "N/A")
-            vol_str = f"{vol:,} mm³" if isinstance(vol, (int, float)) else f"{vol} mm³"
-            cols = st.columns(5)
-            with cols[0]:
-                st.markdown(metric_card("Volume", vol_str), unsafe_allow_html=True)
-            with cols[1]:
-                diam = morph.get("max_diameter", 0)
-                st.markdown(metric_card("Max Diameter", f"{float(diam):.1f} mm"), unsafe_allow_html=True)
-            with cols[2]:
-                sph = morph.get("sphericity", 0)
-                st.markdown(metric_card("Sphericity", f"{float(sph):.3f}"), unsafe_allow_html=True)
-            with cols[3]:
-                st.markdown(metric_card("WHO Grade", who.get("who_grade", "N/A")), unsafe_allow_html=True)
-            with cols[4]:
-                conf = who.get("confidence", 0)
-                st.markdown(metric_card("Confidence", f"{float(conf):.0%}"), unsafe_allow_html=True)
-
-            st.markdown("")
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown("### Tumor Classification")
-                st.markdown(f"**Type:** {who.get('full_name', 'N/A')}")
-                st.markdown(
-                    f"**Severity:** {severity_badge(tumor.get('volume_severity', 'unknown'))}",
-                    unsafe_allow_html=True,
-                )
-                st.markdown(f"**Location:** {', '.join(tumor.get('location', ['unknown']))}")
-                st.markdown(f"**Prognosis:** {who.get('prognosis', 'N/A')}")
-
-            with col2:
-                st.markdown("### Response Assessment")
-                st.markdown(
-                    f"**RANO:** {rano_badge(rano.get('assessment', 'N/A'))}",
-                    unsafe_allow_html=True,
-                )
-                for r in rano.get("reasoning", []):
-                    st.markdown(f"- {r}")
-                prog = report.get("tumor_progression", {})
-                st.markdown(f"**Progression:** {prog.get('state', 'unknown').title()}")
-                if prog.get("growth_rate") is not None:
-                    st.markdown(f"**Growth Rate:** {prog['growth_rate']:.2f} mm³/day")
-
-            st.markdown("### Inferred Symptoms")
-            symptoms = tumor.get("inferred_symptoms", [])
-            if symptoms:
-                scols = st.columns(min(len(symptoms), 4))
-                for i, s in enumerate(symptoms):
-                    with scols[i % len(scols)]:
-                        st.info(s.title())
-            else:
-                st.markdown("_No symptoms inferred_")
-
-            diff = who.get("differential_diagnosis", [])
-            if diff:
-                st.markdown("### Differential Diagnosis")
-                for d in diff:
-                    with st.expander(f"{d['type'].replace('_', ' ').title()} (score: {d['score']})"):
-                        for r in d.get("reasoning", []):
-                            st.markdown(f"- {r}")
-        elif clinical:
-            st.info("Full report not available — showing clinical profile only.")
-            st.json(clinical)
-        else:
-            st.warning("No data available for this patient.")
-
-    # ── MRI Visualization ─────────────────────────────────────
-    with tab_mri:
-        st.markdown("## MRI Visualization")
-        if viz_images:
-            primary   = {k: v for k, v in viz_images.items() if k in ["Tumor Overlay", "Mri Slices"]}
-            secondary = {k: v for k, v in viz_images.items() if k not in primary}
-            if primary:
-                cols = st.columns(len(primary))
-                for i, (label, path) in enumerate(primary.items()):
-                    with cols[i]:
-                        st.markdown(f"#### {label}")
-                        render_image_safe(path)
-            if secondary:
-                st.markdown("---")
-                cols = st.columns(min(len(secondary), 3))
-                for i, (label, path) in enumerate(secondary.items()):
-                    with cols[i % 3]:
-                        st.markdown(f"#### {label}")
-                        render_image_safe(path)
-        else:
-            st.warning("No visualisation images found. Run the pipeline to generate them.")
-
-        seg_path  = os.path.join(OUTPUT_DIR, "segmentation", f"{patient_id}_seg.nii.gz")
-        prep_path = os.path.join(OUTPUT_DIR, "preprocessed", f"{patient_id}_preprocessed.npy")
+        # Classification & RANO row
         col1, col2 = st.columns(2)
         with col1:
-            st.markdown("#### Output Files")
-            st.markdown(f"- Segmentation mask: {'✅' if os.path.exists(seg_path) else '❌'}")
-            st.markdown(f"- Preprocessed volume: {'✅' if os.path.exists(prep_path) else '❌'}")
+            st.markdown("### Tumor Classification")
+            st.markdown(f"**Type:** {who.get('full_name', 'N/A')}")
+            st.markdown(f"**Severity:** {severity_badge(tumor.get('volume_severity', 'unknown'))}", unsafe_allow_html=True)
+            st.markdown(f"**Location:** {', '.join(tumor.get('location', ['unknown']))}")
+            st.markdown(f"**Prognosis:** {who.get('prognosis', 'N/A')}")
+
         with col2:
-            if os.path.exists(prep_path):
-                vol_arr = np.load(prep_path)
-                st.markdown("#### Volume Info")
-                st.markdown(f"- Shape: `{vol_arr.shape}`")
-                st.markdown(f"- Dtype: `{vol_arr.dtype}`")
-                st.markdown(f"- Range: `[{vol_arr.min():.3f}, {vol_arr.max():.3f}]`")
-
-    # ── Radiomics ─────────────────────────────────────────────
-    with tab_rad:
-        st.markdown("## Radiomics Features")
-        if radiomics:
-            shape_f     = {k: v for k, v in radiomics.items() if k.startswith("shape_")}
-            intensity_f = {k: v for k, v in radiomics.items() if k.startswith("intensity_")}
-            texture_f   = {
-                k: v for k, v in radiomics.items()
-                if not k.startswith("shape_") and not k.startswith("intensity_")
-            }
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown("### Shape Features")
-                for k, v in shape_f.items():
-                    label = k.replace("shape_", "").replace("_", " ").title()
-                    st.metric(label, f"{v:,.4f}" if isinstance(v, float) else f"{v:,}")
-            with col2:
-                st.markdown("### Intensity Features")
-                for k, v in intensity_f.items():
-                    label = k.replace("intensity_", "").replace("_", " ").title()
-                    st.metric(label, f"{v:.6f}")
-            if texture_f:
-                st.markdown("### Texture Features (GLCM)")
-                st.json(texture_f)
-            st.markdown("### Intensity Distribution")
-            chart_keys = ("intensity_mean", "intensity_std", "intensity_min",
-                          "intensity_max", "intensity_median")
-            chart_data = {k.replace("intensity_", ""): v
-                          for k, v in intensity_f.items() if k in chart_keys}
-            if chart_data:
-                st.bar_chart(chart_data)
-        else:
-            st.warning("No radiomics data found. Run the pipeline to generate features.")
-
-    # ── Classification ────────────────────────────────────────
-    with tab_class:
-        st.markdown("## Tumor Classification")
-        if report:
-            who = report.get("who_classification", {})
-            st.markdown(f"## {who.get('full_name', 'Unknown')}")
-            st.markdown(
-                f"**WHO Grade:** {who.get('who_grade', 'N/A')}  ·  "
-                f"**Confidence:** {who.get('confidence', 0):.0%}  ·  "
-                f"**Type:** `{who.get('classified_as', 'N/A')}`"
-            )
-            st.markdown("---")
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown("### Description")
-                st.markdown(who.get("description", "N/A"))
-                st.markdown("### Reasoning")
-                for r in who.get("reasoning", []):
-                    st.markdown(f"- {r}")
-            with col2:
-                st.markdown("### Prognosis")
-                st.info(who.get("prognosis", "N/A"))
-                st.markdown("### Standard Treatment")
-                st.success(who.get("standard_treatment", "N/A"))
-
-            st.markdown("---")
-            rano = report.get("rano_assessment", {})
-            st.markdown("## RANO Assessment")
-            st.markdown(rano_badge(rano.get("assessment", "N/A")), unsafe_allow_html=True)
-            for r in rano.get("reasoning", []):
+            st.markdown("### Response Assessment")
+            st.markdown(f"**RANO:** {rano_badge(rano.get('assessment', 'N/A'))}", unsafe_allow_html=True)
+            reasoning = rano.get("reasoning", [])
+            for r in reasoning:
                 st.markdown(f"- {r}")
 
+            prog = report.get("tumor_progression", {})
+            st.markdown(f"**Progression:** {prog.get('state', 'unknown').title()}")
+            if prog.get("growth_rate") is not None:
+                st.markdown(f"**Growth Rate:** {prog['growth_rate']:.2f} mm³/day")
+
+        # Symptoms
+        st.markdown("### Inferred Symptoms")
+        symptoms = tumor.get("inferred_symptoms", [])
+        if symptoms:
+            symptom_cols = st.columns(min(len(symptoms), 4))
+            for i, s in enumerate(symptoms):
+                with symptom_cols[i % len(symptom_cols)]:
+                    st.info(s.title())
+        else:
+            st.markdown("_No symptoms inferred_")
+
+        # Differential diagnosis
+        diff = who.get("differential_diagnosis", [])
+        if diff:
+            st.markdown("### Differential Diagnosis")
+            for d in diff:
+                with st.expander(f"{d['type'].replace('_', ' ').title()} (score: {d['score']})"):
+                    for r in d.get("reasoning", []):
+                        st.markdown(f"- {r}")
+
+    elif clinical:
+        st.info("Full report not available. Showing clinical profile only.")
+        st.json(clinical)
+    else:
+        st.warning("No data available for this patient.")
+
+
+# ── MRI Visualization ───────────────────────────────────────
+elif section == "MRI Visualization":
+    st.markdown("# MRI Visualization")
+
+    if viz_images:
+        # Show tumor overlay and MRI slices side by side if available
+        primary = ["Tumor Overlay", "Mri Slices"]
+        top_imgs = {k: v for k, v in viz_images.items() if k in primary}
+        other_imgs = {k: v for k, v in viz_images.items() if k not in primary}
+
+        if top_imgs:
+            cols = st.columns(len(top_imgs))
+            for i, (label, path) in enumerate(top_imgs.items()):
+                with cols[i]:
+                    st.markdown(f"#### {label}")
+                    render_image_safe(path)
+
+        if other_imgs:
             st.markdown("---")
-            similar = report.get("similar_cases", [])
-            st.markdown(f"## Similar Cases ({len(similar)} retrieved)")
-            if similar:
-                for case in similar:
-                    with st.expander(
-                        f"Patient {case.get('patient_id', '?')} — "
-                        f"Similarity: {case.get('similarity_score', 0):.2%}"
-                    ):
-                        st.markdown(f"- **Location:** {', '.join(case.get('tumor_location', []))}")
-                        st.markdown(f"- **Severity:** {case.get('volume_severity', 'N/A')}")
-            else:
-                st.markdown("_No similar cases retrieved._")
-        else:
-            st.warning("No report data found for this patient.")
+            cols = st.columns(min(len(other_imgs), 3))
+            for i, (label, path) in enumerate(other_imgs.items()):
+                with cols[i % 3]:
+                    st.markdown(f"#### {label}")
+                    render_image_safe(path)
+    else:
+        st.warning("No visualization images found. Run the full pipeline to generate them.")
 
-    # ── Clinical Reasoning ────────────────────────────────────
-    with tab_reason:
-        st.markdown("## AI Clinical Reasoning")
-        if report:
-            reasoning_text = report.get("ai_clinical_reasoning", "")
-            if reasoning_text:
-                section_map = {
-                    "DIAGNOSIS":      ("🔬", st.markdown),
-                    "TREATMENT":      ("💊", st.success),
-                    "PROGNOSIS":      ("📊", st.info),
-                    "PROGRESSION":    ("📈", st.markdown),
-                    "RANO":           ("📋", st.markdown),
-                    "SYMPTOM":        ("🩺", st.warning),
-                    "RECOMMENDATION": ("✅", st.success),
-                }
-                for block in reasoning_text.split("\n\n"):
-                    if ":" in block:
-                        title, body = block.split(":", 1)
-                        title = title.strip()
-                        body  = body.strip()
-                        matched = False
-                        for kw, (icon, fn) in section_map.items():
-                            if kw in title.upper():
-                                st.markdown(f"### {icon} {title}")
-                                fn(body)
-                                matched = True
-                                break
-                        if not matched:
-                            st.markdown(f"### {title}")
-                            st.markdown(body)
+    # Show segmentation info
+    seg_path = os.path.join(OUTPUT_DIR, "segmentation", f"{patient_id}_seg.nii.gz")
+    prep_path = os.path.join(OUTPUT_DIR, "preprocessed", f"{patient_id}_preprocessed.npy")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("#### Available Data")
+        st.markdown(f"- Segmentation mask: {'✅' if os.path.exists(seg_path) else '❌'}")
+        st.markdown(f"- Preprocessed volume: {'✅' if os.path.exists(prep_path) else '❌'}")
+    with col2:
+        if os.path.exists(prep_path):
+            vol = np.load(prep_path)
+            st.markdown("#### Volume Info")
+            st.markdown(f"- Shape: {vol.shape}")
+            st.markdown(f"- Dtype: {vol.dtype}")
+            st.markdown(f"- Range: [{vol.min():.3f}, {vol.max():.3f}]")
+
+
+# ── Radiomics ────────────────────────────────────────────────
+elif section == "Radiomics":
+    st.markdown("# Radiomics Features")
+
+    if radiomics:
+        shape_features = {k: v for k, v in radiomics.items() if k.startswith("shape_")}
+        intensity_features = {k: v for k, v in radiomics.items() if k.startswith("intensity_")}
+        texture_features = {k: v for k, v in radiomics.items() if not k.startswith("shape_") and not k.startswith("intensity_")}
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("### Shape Features")
+            for k, v in shape_features.items():
+                label = k.replace("shape_", "").replace("_", " ").title()
+                if isinstance(v, float):
+                    st.metric(label, f"{v:,.4f}")
+                else:
+                    st.metric(label, f"{v:,}")
+
+        with col2:
+            st.markdown("### Intensity Features")
+            for k, v in intensity_features.items():
+                label = k.replace("intensity_", "").replace("_", " ").title()
+                st.metric(label, f"{v:.6f}")
+
+        if texture_features:
+            st.markdown("### Texture Features")
+            st.json(texture_features)
+
+        # Bar chart of intensity distribution stats
+        st.markdown("### Intensity Distribution")
+        chart_data = {
+            k.replace("intensity_", ""): v
+            for k, v in intensity_features.items()
+            if k in ("intensity_mean", "intensity_std", "intensity_min", "intensity_max", "intensity_median")
+        }
+        if chart_data:
+            st.bar_chart(chart_data)
+
+    else:
+        st.warning("No radiomics data found for this patient.")
+
+
+# ── Classification ───────────────────────────────────────────
+elif section == "Classification":
+    st.markdown("# Tumor Classification Details")
+
+    if report:
+        who = report.get("who_classification", {})
+
+        st.markdown(f"## {who.get('full_name', 'Unknown')}")
+        st.markdown(f"**WHO Grade:** {who.get('who_grade', 'N/A')}  |  "
+                    f"**Confidence:** {who.get('confidence', 0):.0%}  |  "
+                    f"**Type:** `{who.get('classified_as', 'N/A')}`")
+
+        st.markdown("---")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("### Description")
+            st.markdown(who.get("description", "N/A"))
+
+            st.markdown("### Reasoning")
+            for r in who.get("reasoning", []):
+                st.markdown(f"- {r}")
+
+        with col2:
+            st.markdown("### Prognosis")
+            st.info(who.get("prognosis", "N/A"))
+
+            st.markdown("### Standard Treatment")
+            st.success(who.get("standard_treatment", "N/A"))
+
+        # RANO
+        st.markdown("---")
+        rano = report.get("rano_assessment", {})
+        st.markdown("## RANO Assessment")
+        st.markdown(rano_badge(rano.get("assessment", "N/A")), unsafe_allow_html=True)
+        for r in rano.get("reasoning", []):
+            st.markdown(f"- {r}")
+
+        # Similar cases
+        st.markdown("---")
+        similar = report.get("similar_cases", [])
+        st.markdown(f"## Similar Cases ({len(similar)} found)")
+        if similar:
+            for case in similar:
+                with st.expander(f"Patient {case.get('patient_id', '?')} — Similarity: {case.get('similarity_score', 0):.2%}"):
+                    st.markdown(f"- **Location:** {', '.join(case.get('tumor_location', []))}")
+                    st.markdown(f"- **Severity:** {case.get('volume_severity', 'N/A')}")
+        else:
+            st.markdown("_No similar cases retrieved. Run with Weaviate to enable similarity search._")
+    else:
+        st.warning("No report data found for this patient.")
+
+
+# ── Clinical Reasoning ──────────────────────────────────────
+elif section == "Clinical Reasoning":
+    st.markdown("# AI Clinical Reasoning")
+
+    if report:
+        reasoning = report.get("ai_clinical_reasoning", "")
+        if reasoning:
+            # Parse the reasoning text into sections
+            sections = reasoning.split("\n\n")
+            for s in sections:
+                if ":" in s:
+                    title, body = s.split(":", 1)
+                    title = title.strip()
+                    body = body.strip()
+                    if "DIAGNOSIS" in title.upper():
+                        st.markdown(f"### 🔬 {title}")
+                        st.markdown(body)
+                    elif "TREATMENT" in title.upper():
+                        st.markdown(f"### 💊 {title}")
+                        st.success(body)
+                    elif "PROGNOSIS" in title.upper():
+                        st.markdown(f"### 📊 {title}")
+                        st.info(body)
+                    elif "PROGRESSION" in title.upper():
+                        st.markdown(f"### 📈 {title}")
+                        st.markdown(body)
+                    elif "RANO" in title.upper():
+                        st.markdown(f"### 📋 {title}")
+                        st.markdown(body)
+                    elif "SYMPTOM" in title.upper():
+                        st.markdown(f"### 🩺 {title}")
+                        st.warning(body)
+                    elif "RECOMMENDATION" in title.upper():
+                        st.markdown(f"### ✅ {title}")
+                        st.success(body)
                     else:
-                        st.markdown(block)
-            else:
-                st.markdown("_No clinical reasoning generated._")
-
-            errors = report.get("pipeline_errors", [])
-            if errors:
-                st.markdown("---")
-                st.markdown("### ⚠️ Pipeline Errors")
-                for e in errors:
-                    st.error(e)
+                        st.markdown(f"### {title}")
+                        st.markdown(body)
+                else:
+                    st.markdown(s)
         else:
-            st.warning("No report data found.")
+            st.markdown("_No clinical reasoning generated._")
 
-    # ── CAP Report ────────────────────────────────────────────
-    with tab_cap:
-        st.markdown("## CAP Structured Pathology Report")
-        if cap:
-            section_names = {
-                "section_1_patient_information":    "📋 Patient Information",
-                "section_2_mri_study_information":  "🔬 MRI Study Information",
-                "section_3_tumor_characteristics":  "🧠 Tumor Characteristics",
-                "section_4_radiomics_summary":      "📊 Radiomics Summary",
-                "section_5_rano_classification":    "📈 RANO Classification",
-                "section_6_who_classification":     "🏥 WHO Classification",
-                "section_7_similar_tumor_cases":    "🔍 Similar Tumor Cases",
-                "section_8_clinical_interpretation":"💡 Clinical Interpretation",
-                "section_9_physician_notes":        "👨‍⚕️ Physician Notes",
-            }
-            for key, title in section_names.items():
-                data = cap.get(key, {})
-                if not data:
-                    continue
-                expanded = key in ("section_1_patient_information",
-                                   "section_3_tumor_characteristics")
-                with st.expander(title, expanded=expanded):
+        # Pipeline errors
+        errors = report.get("pipeline_errors", [])
+        if errors:
+            st.markdown("---")
+            st.markdown("### ⚠️ Pipeline Errors")
+            for e in errors:
+                st.error(e)
+    else:
+        st.warning("No report data found for this patient.")
+
+
+# ── CAP Report ───────────────────────────────────────────────
+elif section == "CAP Report":
+    st.markdown("# CAP Structured Report")
+
+    if cap:
+        section_names = {
+            "section_1_patient_information": "📋 Patient Information",
+            "section_2_mri_study_information": "🔬 MRI Study Information",
+            "section_3_tumor_characteristics": "🧠 Tumor Characteristics",
+            "section_4_radiomics_summary": "📊 Radiomics Summary",
+            "section_5_rano_classification": "📈 RANO Classification",
+            "section_6_who_classification": "🏥 WHO Classification",
+            "section_7_similar_tumor_cases": "🔍 Similar Tumor Cases",
+            "section_8_clinical_interpretation": "💡 Clinical Interpretation",
+            "section_9_physician_notes": "👨‍⚕️ Physician Notes",
+        }
+
+        for key, title in section_names.items():
+            data = cap.get(key, {})
+            if data:
+                with st.expander(title, expanded=(key in ("section_1_patient_information", "section_3_tumor_characteristics"))):
                     if isinstance(data, dict):
                         for k, v in data.items():
-                            lbl = k.replace("_", " ").title()
+                            label = k.replace("_", " ").title()
                             if isinstance(v, list):
-                                st.markdown(f"**{lbl}:**")
+                                st.markdown(f"**{label}:**")
                                 for item in v:
                                     if isinstance(item, dict):
                                         st.json(item)
                                     else:
                                         st.markdown(f"  - {item}")
                             elif isinstance(v, dict):
-                                st.markdown(f"**{lbl}:**")
+                                st.markdown(f"**{label}:**")
                                 st.json(v)
                             elif isinstance(v, float):
-                                st.markdown(f"**{lbl}:** {v:,.4f}")
+                                st.markdown(f"**{label}:** {v:,.4f}")
                             elif isinstance(v, bool):
-                                st.markdown(f"**{lbl}:** {'Yes' if v else 'No'}")
+                                st.markdown(f"**{label}:** {'Yes' if v else 'No'}")
                             else:
-                                st.markdown(f"**{lbl}:** {v}")
+                                st.markdown(f"**{label}:** {v}")
                     else:
                         st.write(data)
+
                     if key == "section_9_physician_notes":
                         st.markdown("---")
                         render_hitl_review_form(patient_id)
-        else:
-            st.warning("No CAP report found. Run the full pipeline (Phase 3) to generate it.")
+    else:
+        st.warning("No CAP report found. Run the full pipeline (Phase 3) to generate it.")
 
-    # ── Processing Status ─────────────────────────────────────
-    with tab_status:
-        st.markdown("## Processing Status")
-        if st.button("🔄 Refresh", use_container_width=False, key="status_refresh"):
+
+# ── Processing Status ───────────────────────────────────────
+elif section == "Processing Status":
+    st.markdown("# Processing Status")
+
+    col1, col2 = st.columns([3, 1])
+    with col2:
+        if st.button("🔄 Refresh", use_container_width=True):
             st.rerun()
+        auto_refresh = st.checkbox("Auto-refresh (10s)")
 
-        jobs           = get_all_jobs()
-        running_jobs   = [j for j in jobs if j.get("status") == "running"]
-        completed_jobs = [j for j in jobs if j.get("status") == "completed"]
-        error_jobs     = [j for j in jobs if j.get("status") in ("completed_with_errors", "failed")]
+    jobs = get_all_jobs()
+    running_jobs = [j for j in jobs if j.get("status") == "running"]
+    completed_jobs = [j for j in jobs if j.get("status") == "completed"]
+    error_jobs = [j for j in jobs if j.get("status") in ("completed_with_errors", "failed")]
 
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Total Jobs",    len(jobs))
-        c2.metric("Running",       len(running_jobs))
-        c3.metric("Completed",     len(completed_jobs))
-        c4.metric("Errors/Failed", len(error_jobs))
+    # Summary metrics
+    cols = st.columns(4)
+    with cols[0]:
+        st.metric("Total Jobs", len(jobs))
+    with cols[1]:
+        st.metric("Running", len(running_jobs))
+    with cols[2]:
+        st.metric("Completed", len(completed_jobs))
+    with cols[3]:
+        st.metric("Errors/Failed", len(error_jobs))
 
-        if not jobs:
-            st.info("No processing jobs yet. Select a patient and click **🚀 Run Analysis**.")
+    # Running jobs
+    if running_jobs:
+        st.markdown("### ⏳ Currently Running")
+        for j in running_jobs:
+            with st.container(border=True):
+                c1, c2 = st.columns([3, 1])
+                with c1:
+                    st.markdown(f"**{j['patient_id']}**")
+                    started = j.get("started_at", "")[:19]
+                    st.caption(f"Started: {started}")
+                with c2:
+                    log_path = j.get("log_file", "")
+                    if log_path and os.path.exists(log_path):
+                        with open(log_path) as lf:
+                            lines = lf.readlines()
+                        last_lines = lines[-5:] if lines else ["(no output yet)"]
+                        with st.expander("Live log"):
+                            st.code("".join(last_lines))
 
-        if running_jobs:
-            st.markdown("### ⏳ Currently Running")
-            for j in running_jobs:
-                with st.container(border=True):
-                    a, b = st.columns([3, 1])
-                    with a:
-                        st.markdown(f"**{j['patient_id']}**")
-                        st.caption(f"Started: {j.get('started_at', '')[:19]}")
-                    with b:
-                        lp = j.get("log_file", "")
-                        if lp and os.path.exists(lp):
-                            with open(lp) as lf:
-                                tail = "".join(lf.readlines()[-5:])
-                            with st.expander("Live log"):
-                                st.code(tail)
-
-        if error_jobs:
-            st.markdown("### ⚠️ Errors & Failures")
-            for j in error_jobs:
-                with st.container(border=True):
-                    a, b = st.columns([3, 1])
-                    with a:
-                        lbl = ("Completed with errors"
-                               if j["status"] == "completed_with_errors" else "Failed")
-                        st.markdown(f"**{j['patient_id']}** — {lbl}")
-                        for e in (j.get("errors") or [])[:3]:
+    # Error / failed jobs
+    if error_jobs:
+        st.markdown("### ⚠️ Errors & Failures")
+        for j in error_jobs:
+            with st.container(border=True):
+                c1, c2 = st.columns([3, 1])
+                with c1:
+                    status_label = "Completed with errors" if j["status"] == "completed_with_errors" else "Failed"
+                    st.markdown(f"**{j['patient_id']}** — {status_label}")
+                    errors = j.get("errors", [])
+                    if errors:
+                        for e in errors[:3]:
                             st.warning(e)
-                        st.caption(f"Finished: {j.get('finished_at', '')[:19]}")
-                    with b:
-                        if st.button("🔄 Reprocess",
-                                     key=f"err_reprocess_{j['patient_id']}",
-                                     use_container_width=True):
-                            if start_pipeline_job(j["patient_id"],
-                                                  j.get("data_dir", ""),
-                                                  j.get("input_format", "nifti")):
-                                st.rerun()
-                        lp = j.get("log_file", "")
-                        if lp and os.path.exists(lp):
-                            with st.expander("Full log"):
-                                with open(lp) as lf:
-                                    st.code(lf.read()[-3000:])
+                    finished = j.get("finished_at", "")[:19]
+                    st.caption(f"Started: {j.get('started_at', '')[:19]} · Finished: {finished}")
+                with c2:
+                    if st.button("🔄 Reprocess", key=f"reprocess_{j['patient_id']}", use_container_width=True):
+                        if start_pipeline_job(j["patient_id"], j.get("data_dir", ""), j.get("input_format", "dicom")):
+                            st.rerun()
+                        else:
+                            st.info("Cannot reprocess: original staged data directory no longer exists.")
+                    log_path = j.get("log_file", "")
+                    if log_path and os.path.exists(log_path):
+                        with st.expander("Full log"):
+                            with open(log_path) as lf:
+                                st.code(lf.read()[-3000:])
 
-        if completed_jobs:
-            st.markdown("### ✅ Completed")
-            for j in completed_jobs:
-                with st.container(border=True):
-                    a, b = st.columns([3, 1])
-                    with a:
-                        st.markdown(f"**{j['patient_id']}**")
-                        st.caption(
-                            f"Started: {j.get('started_at', '')[:19]}  ·  "
-                            f"Finished: {j.get('finished_at', '')[:19]}"
-                        )
-                    with b:
-                        if st.button("🔄 Reprocess",
-                                     key=f"done_reprocess_{j['patient_id']}",
-                                     use_container_width=True):
-                            if start_pipeline_job(j["patient_id"],
-                                                  j.get("data_dir", ""),
-                                                  j.get("input_format", "nifti")):
-                                st.rerun()
-                            else:
-                                st.info("Data directory no longer available.")
+    # Completed jobs
+    if completed_jobs:
+        st.markdown("### ✅ Completed")
+        for j in completed_jobs:
+            with st.container(border=True):
+                c1, c2 = st.columns([3, 1])
+                with c1:
+                    st.markdown(f"**{j['patient_id']}**")
+                    started = j.get("started_at", "")[:19]
+                    finished = j.get("finished_at", "")[:19]
+                    st.caption(f"Started: {started} · Finished: {finished}")
+                with c2:
+                    if st.button("🔄 Reprocess", key=f"reprocess_{j['patient_id']}", use_container_width=True):
+                        if start_pipeline_job(j["patient_id"], j.get("data_dir", ""), j.get("input_format", "dicom")):
+                            st.rerun()
+                        else:
+                            st.info("Cannot reprocess: original staged data directory no longer exists.")
+
+    if not jobs:
+        st.info("No processing jobs yet. Select a patient and click 'Run Pipeline' to start.")
+
+    if auto_refresh:
+        time.sleep(10)
+        st.rerun()
