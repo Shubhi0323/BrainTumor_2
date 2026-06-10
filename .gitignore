@@ -1,7 +1,79 @@
-outputs
-data
-UCSF-PDGM-v5
+# ── Runtime outputs (never commit) ───────────────────────────────────
+outputs/
+brats_outputs/
+data/
+UCSF-PDGM-v5/
+
+# ── Python cache ──────────────────────────────────────────────────────
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Large data / evaluation CSV files ────────────────────────────────
+evaluation_results_batch_*.csv
+mcp_clinical_summary.csv
+*.zip
+BrainTumorMRI.zip
+cap_reports.zip
+
+# ── Research PDFs (large, not needed to run the code) ────────────────
+*.pdf
+science.adz4433*.pdf
+2509.20279v1.pdf
+A-MEM*.pdf
+
+# ── Logs ──────────────────────────────────────────────────────────────
+*.log
+pyradiomics_install.log
 pipeline.log
+
+# ── Temporary / dead scripts (already deleted, kept here for safety) ──
 verify_production.py
+verify_paper.py
+fix_paper.py
+fix_formatting.py
+final_overhaul.py
+generate_pub_figures.py
+generate_memory_figures.py
+generate_memory_combined.py
+generate_essential_figures.py
+regenerate_strict_only_figures.py
+run_evaluation.py
+baseline_comparison.py
+strict_relevance_evaluation.py
+compute_radiomics_metrics.py
+test_memory.py
+
+# ── ChromaDB local store ──────────────────────────────────────────────
+outputs/chromadb/
+*.chroma
+
+# ── Environment / secrets ─────────────────────────────────────────────
+.env
+.env.*
+*.pem
+secrets.json
+
+# ── OS files ──────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── IDE files ─────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── Model weights (too large for GitHub — download via colab_start.sh) ─
+*.pt
+*.pth
+*.onnx
+*.bin
+dynunet_weights/

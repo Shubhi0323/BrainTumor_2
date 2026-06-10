@@ -1,0 +1,309 @@
+% ==============================================================
+% SECTION I: INTRODUCTION
+% ==============================================================
+\section{Introduction}
+
+Brain tumors constitute one of the most diagnostically demanding conditions in clinical oncology, where the distance between a segmented MRI scan and a clinician-actionable treatment plan remains vast. Each year, approximately 300,000 new central nervous system tumors are diagnosed globally~\cite{ostrom2021cbtrus}, and in every case, the neuroradiologist must synthesize volumetric measurements, anatomical localization, differential classification per WHO CNS5 molecular criteria~\cite{louis2021who}, treatment response assessment per RANO guidelines~\cite{wen2010rano}, and longitudinal comparison with prior scans---all before generating a structured pathology report conforming to College of American Pathologists (CAP) templates~\cite{cap2024}. This integration is performed manually, case by case, and is neither scalable nor reproducible.
+
+Deep learning has transformed individual components of this chain. Segmentation models such as nnU-Net~\cite{isensee2021nnu} and MONAI SegResNet~\cite{monai2023} achieve Dice coefficients exceeding 0.89 on benchmark datasets, while computational radiomics~\cite{vangriethuysen2017radiomics} extracts quantitative phenotypic features that carry prognostic value for glioma grading~\cite{kickingereder2016radiomic}. Yet these advances remain isolated. A SegResNet model produces a probability mask but generates no clinical interpretation. A PyRadiomics pipeline extracts texture features without downstream reasoning about tumor type or treatment response. The diagnostic chain is fragmented: segmentation, classification, assessment, and reporting exist as disconnected modules, each requiring manual reconciliation by a subspecialist.
+
+The emergence of large language models (LLMs) has prompted efforts to bridge this gap through automated clinical reasoning~\cite{singhal2023llm}. However, applying LLMs directly to neuroradiology introduces a critical failure mode: hallucination~\cite{kalai2025hallucinate, das2025hallucinate}. Without structured grounding in imaging-derived evidence, language models generate clinically plausible but factually unfounded recommendations---a risk that is categorically unacceptable in treatment planning for malignant gliomas. Moreover, current LLM-based systems treat each patient encounter as a blank slate. No mechanism exists to accumulate diagnostic context across serial scans, to track WHO grade trajectories over time, or to incorporate physician corrections into future reasoning. This absence of clinical memory forces the system to re-derive context that the treating clinician already possesses, undermining both efficiency and trust.
+
+Recent advances in agentic AI---systems where specialized agents communicate through shared state within orchestrated workflows---offer a principled alternative to monolithic model deployment. TissueLab~\cite{tissuelab2025} demonstrated that co-evolving agentic systems with modular tool factories and human-in-the-loop feedback can achieve expert-level performance across pathology, radiology, and spatial omics, outperforming end-to-end vision-language models including GPT-5 on clinically meaningful quantification tasks. Their key insight was that reliable medical AI requires not a single powerful model, but an orchestrated ecosystem of specialized tools coordinated by a language model backbone, with persistent memory layers that retain intermediate results and expert corrections. Separately, A-MEM~\cite{amem2024} introduced the principle of dynamic memory evolution for LLM agents, showing that agentic systems that autonomously organize, link, and consolidate memories produce more contextually coherent reasoning than systems with static retrieval. Together, these works establish that the combination of agentic orchestration and adaptive memory is fundamental to building trustworthy AI systems for complex scientific workflows.
+
+However, neither paradigm has been applied to the full imaging-to-report chain in neuro-oncology. TissueLab operates across broad imaging domains but does not address the specific clinical protocols (WHO CNS5, RANO, CAP) that govern brain tumor diagnosis. A-MEM demonstrates memory dynamics in general-purpose agent settings but lacks the domain-specific memory structures---patient scan histories, classification trajectories, treatment response timelines---that longitudinal oncology demands. No existing system closes the loop from raw multi-modal MRI volumes to protocol-compliant structured reports while maintaining persistent, per-patient clinical memory that evolves with each encounter.
+
+We present \textbf{NeuroAgent}, a three-phase, eight-agent system orchestrated as a LangGraph~\cite{langgraph2024} directed acyclic state machine that addresses this gap. Phase~1 performs N4-corrected preprocessing and MONAI SegResNet inference using pretrained weights from the MONAI Model Zoo BraTS Segmentation Bundle (\texttt{brats\_mri\_segmentation v0.1.9}), followed by PyRadiomics feature extraction and Harvard-Oxford atlas-based anatomical mapping. Phase~2 deploys a WHO CNS5-aligned tumor classifier with sigmoid-calibrated molecular marker scoring, BioClinicalBERT~\cite{alsentzer2019clinical}-driven similar case retrieval, and Llama~3~\cite{llama3}-powered clinical reasoning with rule-based fallback. Phase~3 introduces an adaptive persistent patient memory backed by ChromaDB~\cite{chromadb2024} that accumulates scan history, WHO classification trajectories, and physician corrections across encounters, enabling progression-aware differential diagnosis. A human-in-the-loop (HITL) validation node and automated CAP structured report generator complete the pipeline.
+
+Evaluated on 369 BraTS 2020 training cases (all metrics sourced from \texttt{brats\_outputs/evaluation\_results.csv}), NeuroAgent achieves a mean Dice coefficient of $0.8517 \pm 0.1055$, median Hausdorff Distance (95th percentile) of 3.61~mm, mean sensitivity of $0.9384 \pm 0.0799$, and mean specificity of $0.9975 \pm 0.0024$, with 81.0\% of cases exceeding Dice $\geq$ 0.80. The system completes 368 of 369 cases (99.7\%) at a mean latency of $3.65 \pm 0.16$~seconds per case. Every agent implements graceful two-tier fallback, ensuring clinically meaningful output regardless of infrastructure availability.
+
+Our contributions are as follows:
+\begin{itemize}
+    \item[\textbf{C1}] The first end-to-end agentic pipeline spanning MRI preprocessing, tumor segmentation (MONAI SegResNet with pretrained MONAI Model Zoo weights), radiomics extraction, WHO CNS5 classification, RANO assessment, clinical reasoning, and CAP structured reporting within a single LangGraph state machine.
+    \item[\textbf{C2}] An adaptive persistent clinical memory system (ChromaDB primary, JSON fallback) that accumulates per-patient scan history, WHO grade trajectories, and physician corrections---enabling progression-aware differential diagnosis inspired by A-MEM's~\cite{amem2024} dynamic memory consolidation.
+    \item[\textbf{C3}] A WHO CNS5-aligned molecular scoring engine with sigmoid-calibrated confidence quantification, confidence gap detection, and top-5 differential output---the first integration of WHO CNS5 (2021) molecular criteria within an automated imaging pipeline.
+    \item[\textbf{C4}] A protocol-preserving fallback architecture where every agent implements two-tier degradation (SegResNet $\rightarrow$ ground-truth mask $\rightarrow$ heuristic; Llama~3 $\rightarrow$ rule-based reasoning; ChromaDB $\rightarrow$ JSON), validated at 99.7\% completion across 369 BraTS 2020 cases.
+    \item[\textbf{C5}] Automated co-generation of RANO response assessment and CAP structured pathology reports derived entirely from segmentation outputs and radiomics features, eliminating manual report authoring from the diagnostic workflow.
+\end{itemize}
+
+
+% ==============================================================
+% SECTION II: RELATED WORK
+% ==============================================================
+\section{Related Work}
+
+\subsection{Brain Tumor Segmentation and Foundation Models}
+
+Automated brain tumor segmentation has advanced rapidly through successive iterations of the BraTS challenge series~\cite{menze2015brats, bakas2018brats}. The self-configuring nnU-Net~\cite{isensee2021nnu} established the dominant paradigm by eliminating manual hyperparameter tuning, achieving mean Dice coefficients of approximately 0.89 on whole-tumor segmentation for the BraTS 2020 dataset. Transformer-based architectures including TransBTS~\cite{wang2021transbts} and SwinBTS~\cite{jiang2022swinbts} introduced multi-scale attention mechanisms for improved boundary delineation, while hybrid approaches combining convolutional and attention layers continue to push accuracy on the standard benchmarks.
+
+The MONAI framework~\cite{monai2023} operationalized these advances for clinical deployment, providing production-ready implementations of architectures including SegResNet with pretrained weights distributed through the MONAI Model Zoo. We adopt the SegResNet architecture with the \texttt{brats\_mri\_segmentation} bundle (v0.1.9), using 4-channel input (T1, T1ce, T2, FLAIR) and 3-channel output (Enhancing Tumor, Tumor Core, Whole Tumor) with sliding-window inference (ROI $240 \times 240 \times 160$, Gaussian mode, overlap 0.5). This choice prioritizes inference efficiency and integration simplicity over marginal accuracy gains from more complex architectures.
+
+Despite these advances, all existing segmentation systems terminate at the mask level. The clinical interpretation of a tumor mask---its WHO classification, treatment implications, prognostic significance, and relationship to prior scans---remains entirely manual. This is not a limitation of the models themselves, but of the ecosystems in which they operate: segmentation is treated as a terminal task rather than the first node in a clinical reasoning chain.
+
+\subsection{Computational Radiomics in Neuro-Oncology}
+
+Quantitative radiomics transforms imaging data into high-dimensional feature vectors encoding shape, intensity, and texture characteristics of tumor regions. The Image Biomarker Standardization Initiative (IBSI)~\cite{zwanenburg2020ibsi} established reproducibility standards, while PyRadiomics~\cite{vangriethuysen2017radiomics} provided an open-source implementation supporting extraction of 107+ features including first-order statistics, gray-level co-occurrence matrices (GLCM), gray-level run-length matrices (GLRLM), and gray-level size zone matrices (GLSZM).
+
+In glioma research, radiomic features have demonstrated prognostic value for survival prediction~\cite{kickingereder2016radiomic}, molecular subtype inference, and treatment response monitoring. However, radiomics pipelines typically operate as standalone feature extraction tools, producing CSV files that require separate downstream analysis. No existing system integrates radiomics features as structured input to automated WHO classification or clinical reasoning engines. In NeuroAgent, the 107+ PyRadiomics features serve as direct inputs to both the WHO CNS5 classifier (where morphological concordance scores drive tumor type probability) and the BioClinicalBERT embedding generator (where clinical text derived from radiomics features produces patient-level semantic representations).
+
+\subsection{Agentic AI Systems for Scientific and Clinical Workflows}
+
+The concept of orchestrating specialized computational agents through shared state has emerged as a powerful paradigm for complex scientific workflows. LangGraph and LangChain~\cite{langgraph2024} provide the computational infrastructure for defining stateful multi-agent graphs where each node receives, transforms, and returns a typed state object.
+
+TissueLab~\cite{tissuelab2025} instantiated this paradigm for medical imaging, introducing a co-evolving agentic system that coordinates domain-specific tool factories across pathology, radiology, and spatial omics domains. Its architecture embodies four principles---adaptivity, co-evolution, safety, and community value---that we share. TissueLab's key innovation is that the LLM functions purely as an orchestration layer, never directly processing raw images but instead coordinating specialized tools whose outputs are persisted in a shared memory layer. This design eliminates token overload and attention dilution~\cite{liu2024lost} when processing high-dimensional medical data. TissueLab achieved state-of-the-art performance across diverse tasks including tumor invasion depth measurement, lymph node metastasis classification, and fatty liver diagnosis, consistently outperforming end-to-end vision-language models~\cite{tissuelab2025}. Their demonstration that agentic orchestration with human-in-the-loop feedback achieves expert-level clinical quantification within minutes provides the foundational validation for our approach.
+
+NeuroAgent extends TissueLab's orchestration principles into the specific domain of neuro-oncological diagnosis, with three critical differences: (i) we implement domain-specific clinical protocols (WHO CNS5, RANO, CAP) as first-class agent nodes rather than relying on external guideline retrieval; (ii) we maintain persistent per-patient longitudinal memory rather than per-session working memory; and (iii) we operate with a fully local, privacy-preserving inference stack (Llama~3 via Ollama) rather than requiring external API access.
+
+\subsection{Memory Architectures for LLM Agents}
+
+The capacity for autonomous memory organization is a distinguishing feature of advanced agentic systems. A-MEM~\cite{amem2024} introduced the concept of agentic memory---where the agent itself decides what to remember, how to organize memories, and when to consolidate or discard stored context. Unlike retrieval-augmented generation (RAG)~\cite{lewis2020rag}, which retrieves static document chunks, A-MEM implements dynamic memory evolution through three mechanisms: (i) contextual memory retrieval that selects relevant memories based on the current reasoning context; (ii) memory linking that establishes semantic connections between related memory fragments; and (iii) autonomous memory organization that consolidates redundant memories and promotes frequently-accessed patterns.
+
+This paradigm maps naturally to longitudinal clinical care, where a physician's understanding of a patient deepens with each encounter. A neuro-oncologist tracking a glioblastoma patient accumulates not raw scan data but distilled clinical insights: how tumor volume changed between timepoints, whether the WHO classification shifted, what the RANO assessment trajectory implies for treatment decisions. Each new scan is interpreted through the lens of this accumulated context.
+
+NeuroAgent's patient memory system implements an A-MEM-inspired architecture adapted for clinical longitudinal data. ChromaDB~\cite{chromadb2024} serves as the primary store with HNSW cosine similarity indexing, persisting structured scan snapshots (tumor location, volume severity, WHO classification, RANO assessment, inferred symptoms) as semantically retrievable units. Upon each new encounter, the system retrieves the patient's complete history, enabling progression-aware reasoning (e.g., detecting volume increase across timepoints) and classification trajectory analysis. Critically, physician corrections captured through the HITL validation node are stored alongside automated findings, implementing a correction loop where expert feedback refines future retrievals. A JSON flat-file fallback ensures that memory persistence functions even without ChromaDB infrastructure, maintaining the \textit{completeness} of the memory contract while sacrificing only the \textit{semantic retrieval} capability.
+
+\subsection{LLM-Augmented Clinical Reasoning and Hallucination Mitigation}
+
+Large language models have demonstrated remarkable competence in clinical knowledge benchmarks~\cite{singhal2023llm}, but their deployment for clinical decision support introduces the fundamental risk of hallucination---generating outputs that are linguistically fluent but factually incorrect~\cite{kalai2025hallucinate, das2025hallucinate}. In neuro-oncology, where a mischaracterized tumor grade can alter a treatment plan from observation to aggressive chemoradiation, this risk is categorically unacceptable.
+
+Several strategies have been proposed to mitigate hallucination in medical AI. TissueLab~\cite{tissuelab2025} employs the Model Context Protocol (MCP) to dynamically retrieve authoritative clinical guidelines, grounding LLM outputs in traceable external evidence. RAG-based systems~\cite{lewis2020rag} augment LLM reasoning with retrieved document context. However, both approaches rely on the availability of external resources at inference time.
+
+NeuroAgent adopts a fundamentally different strategy: \textit{structural grounding}. The clinical reasoning agent (Llama~3 via Ollama) receives not free-text clinical notes but a structured JSON payload containing segmentation metrics, radiomics features, WHO classification scores, RANO assessments, and patient history---all derived from prior pipeline stages. The LLM synthesizes these structured inputs into narrative clinical interpretation, but cannot hallucinate the underlying data because the data is computationally derived rather than linguistically generated. When Ollama is unavailable, a deterministic rule-based engine generates the same report sections using conditional logic on the structured inputs, providing identical clinical coverage without any LLM involvement. This two-tier design implements what we term \textit{graceful degradation without information loss}: the system sacrifices narrative quality but never sacrifices clinical content.
+
+\subsection{Oncology Protocol Automation}
+
+Three clinical protocols govern the diagnostic reporting of brain tumors:
+
+\textbf{WHO CNS5 Classification (2021)}~\cite{louis2021who} introduced molecular marker requirements alongside histological criteria for glioma classification, mandating IDH mutation status, MGMT methylation, 1p/19q codeletion, ATRX loss, and TP53 mutation for definitive typing. No prior automated system implements WHO CNS5 molecular scoring from imaging-derived features.
+
+\textbf{RANO Criteria}~\cite{wen2010rano} standardize treatment response assessment into four categories (Complete Response, Partial Response, Stable Disease, Progressive Disease) based on measurable changes in tumor dimensions across timepoints. Automating RANO assessment requires both segmentation and longitudinal memory---precisely the capabilities that NeuroAgent's Phase~1 and Phase~3 provide.
+
+\textbf{CAP Structured Reporting}~\cite{cap2024} defines institutional templates for pathology reports covering specimen type, tumor site, histologic type, WHO grade, molecular markers, and clinical staging. Manual CAP report generation is a significant documentation burden; NeuroAgent automates this entirely from pipeline outputs.
+
+To our knowledge, no prior system automates all three protocols within a single pipeline. Existing tools address individual components---segmentation models for mask generation, classification systems for tumor typing, or reporting templates for documentation---but none traverses the full chain from raw MRI to protocol-compliant structured reports with persistent patient memory.
+
+
+% ==============================================================
+% BIBLIOGRAPHY ENTRIES (to be placed in references.bib)
+% ==============================================================
+% NOTE: The following BibTeX entries should be placed in a 
+% separate references.bib file and compiled with:
+%   \bibliographystyle{IEEEtran}
+%   \bibliography{references}
+%
+% @article{ostrom2021cbtrus,
+%   author  = {Ostrom, Quinn T. and Patil, Nirav and Cioffi, Gino and Waite, Kristin and Kruchko, Carol and Barnholtz-Sloan, Jill S.},
+%   title   = {{CBTRUS} Statistical Report: Primary Brain and Other Central Nervous System Tumors Diagnosed in the {United States} in 2014--2018},
+%   journal = {Neuro-Oncology},
+%   volume  = {23},
+%   number  = {Supplement 3},
+%   pages   = {iii1--iii105},
+%   year    = {2021}
+% }
+%
+% @article{louis2021who,
+%   author  = {Louis, David N. and Perry, Arie and Wesseling, Pieter and others},
+%   title   = {The 2021 {WHO} Classification of Tumors of the Central Nervous System: A Summary},
+%   journal = {Neuro-Oncology},
+%   volume  = {23},
+%   number  = {8},
+%   pages   = {1231--1251},
+%   year    = {2021}
+% }
+%
+% @article{wen2010rano,
+%   author  = {Wen, Patrick Y. and Macdonald, David R. and Reardon, David A. and others},
+%   title   = {Updated Response Assessment Criteria for High-Grade Gliomas: {RANO} Working Group},
+%   journal = {Journal of Clinical Oncology},
+%   volume  = {28},
+%   number  = {11},
+%   pages   = {1963--1972},
+%   year    = {2010}
+% }
+%
+% @misc{cap2024,
+%   author = {{College of American Pathologists}},
+%   title  = {Cancer Protocol Templates},
+%   year   = {2024},
+%   url    = {https://www.cap.org/protocols-and-guidelines}
+% }
+%
+% @article{isensee2021nnu,
+%   author  = {Isensee, Fabian and Jaeger, Paul F. and Kohl, Simon A. A. and Petersen, Jens and Maier-Hein, Klaus H.},
+%   title   = {nn{U-Net}: A Self-Configuring Method for Deep Learning-Based Biomedical Image Segmentation},
+%   journal = {Nature Methods},
+%   volume  = {18},
+%   number  = {2},
+%   pages   = {203--211},
+%   year    = {2021}
+% }
+%
+% @misc{monai2023,
+%   author = {{MONAI Consortium}},
+%   title  = {{MONAI}: Medical Open Network for Artificial Intelligence},
+%   year   = {2023},
+%   url    = {https://monai.io}
+% }
+%
+% @article{vangriethuysen2017radiomics,
+%   author  = {van Griethuysen, Joost J. M. and others},
+%   title   = {Computational Radiomics System to Decode the Radiographic Phenotype},
+%   journal = {Cancer Research},
+%   volume  = {77},
+%   number  = {21},
+%   pages   = {e104--e107},
+%   year    = {2017}
+% }
+%
+% @article{kickingereder2016radiomic,
+%   author  = {Kickingereder, Philipp and others},
+%   title   = {Radiomic Profiling of Glioblastoma: Identifying an Imaging Predictor of Patient Survival},
+%   journal = {Radiology},
+%   volume  = {280},
+%   number  = {3},
+%   pages   = {880--889},
+%   year    = {2016}
+% }
+%
+% @article{singhal2023llm,
+%   author  = {Singhal, Karan and others},
+%   title   = {Large Language Models Encode Clinical Knowledge},
+%   journal = {Nature},
+%   volume  = {620},
+%   pages   = {172--180},
+%   year    = {2023}
+% }
+%
+% @article{kalai2025hallucinate,
+%   author = {Kalai, Adam Tauman and Nachum, Ofir and Vempala, Santosh S. and Zhang, Edwin},
+%   title  = {Why Language Models Hallucinate},
+%   journal = {arXiv preprint arXiv:2509.04664},
+%   year   = {2025}
+% }
+%
+% @article{das2025hallucinate,
+%   author = {Das, Anindya Bijoy and Sakib, Shahnewaz Karim and Ahmed, Shibbir},
+%   title  = {Trustworthy Medical Imaging with Large Language Models: A Study of Hallucinations Across Modalities},
+%   journal = {arXiv preprint arXiv:2508.07031},
+%   year   = {2025}
+% }
+%
+% @article{tissuelab2025,
+%   author  = {Li, Songhao and Xu, Jonathan and Bao, Tiancheng and others},
+%   title   = {A Co-Evolving Agentic {AI} System for Medical Imaging Analysis},
+%   journal = {arXiv preprint arXiv:2509.20279},
+%   year    = {2025}
+% }
+%
+% @article{amem2024,
+%   author  = {{A-MEM Authors}},
+%   title   = {{A-MEM}: Agentic Memory for {LLM} Agents},
+%   journal = {arXiv preprint},
+%   year    = {2024}
+% }
+%
+% @misc{langgraph2024,
+%   author = {{LangChain}},
+%   title  = {{LangGraph}: Build Stateful Multi-Agent Applications},
+%   year   = {2024},
+%   url    = {https://github.com/langchain-ai/langgraph}
+% }
+%
+% @inproceedings{alsentzer2019clinical,
+%   author    = {Alsentzer, Emily and others},
+%   title     = {Publicly Available Clinical {BERT} Embeddings},
+%   booktitle = {Proc. 2nd Clinical NLP Workshop},
+%   pages     = {72--78},
+%   year      = {2019}
+% }
+%
+% @misc{llama3,
+%   author = {{Meta AI}},
+%   title  = {Llama 3 Model Card},
+%   year   = {2024},
+%   url    = {https://ai.meta.com/llama}
+% }
+%
+% @misc{chromadb2024,
+%   author = {{ChromaDB}},
+%   title  = {The AI-Native Open-Source Embedding Database},
+%   year   = {2024},
+%   url    = {https://www.trychroma.com}
+% }
+%
+% @article{menze2015brats,
+%   author  = {Menze, Bjoern H. and others},
+%   title   = {The Multimodal Brain Tumor Image Segmentation Benchmark ({BRATS})},
+%   journal = {IEEE Trans. Medical Imaging},
+%   volume  = {34},
+%   number  = {10},
+%   pages   = {1993--2024},
+%   year    = {2015}
+% }
+%
+% @article{bakas2018brats,
+%   author  = {Bakas, Spyridon and others},
+%   title   = {Identifying the Best Machine Learning Algorithms for Brain Tumor Segmentation, Progression Assessment, and Overall Survival Prediction in the {BRATS} Challenge},
+%   journal = {arXiv preprint arXiv:1811.02629},
+%   year    = {2018}
+% }
+%
+% @inproceedings{wang2021transbts,
+%   author    = {Wang, Wenxuan and others},
+%   title     = {{TransBTS}: Multimodal Brain Tumor Segmentation Using Transformer},
+%   booktitle = {MICCAI},
+%   pages     = {109--119},
+%   year      = {2021}
+% }
+%
+% @article{jiang2022swinbts,
+%   author  = {Jiang, Hu and others},
+%   title   = {{SwinBTS}: A Method for 3D Multimodal Brain Tumor Segmentation Using Swin Transformer},
+%   journal = {Brain Sciences},
+%   volume  = {12},
+%   number  = {6},
+%   pages   = {797},
+%   year    = {2022}
+% }
+%
+% @article{zwanenburg2020ibsi,
+%   author  = {Zwanenburg, Alex and others},
+%   title   = {The Image Biomarker Standardization Initiative},
+%   journal = {Radiology},
+%   volume  = {295},
+%   number  = {2},
+%   pages   = {328--338},
+%   year    = {2020}
+% }
+%
+% @article{liu2024lost,
+%   author  = {Liu, Nelson F. and others},
+%   title   = {Lost in the Middle: How Language Models Use Long Contexts},
+%   journal = {Trans. Assoc. Computational Linguistics},
+%   volume  = {12},
+%   pages   = {157--173},
+%   year    = {2024}
+% }
+%
+% @inproceedings{lewis2020rag,
+%   author    = {Lewis, Patrick and others},
+%   title     = {Retrieval-Augmented Generation for Knowledge-Intensive {NLP} Tasks},
+%   booktitle = {NeurIPS},
+%   year      = {2020}
+% }
+%
+% @article{abraham2014nilearn,
+%   author  = {Abraham, Alexandre and others},
+%   title   = {Machine Learning for Neuroimaging with Scikit-Learn},
+%   journal = {Frontiers in Neuroinformatics},
+%   volume  = {8},
+%   pages   = {14},
+%   year    = {2014}
+% }
+%
+% @misc{ollama2024,
+%   author = {{Ollama}},
+%   title  = {Run Large Language Models Locally},
+%   year   = {2024},
+%   url    = {https://ollama.com}
+% }

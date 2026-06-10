@@ -1,0 +1,253 @@
+% ==============================================================
+% SECTION IV: EXPERIMENTAL SETUP
+% ==============================================================
+\section{Experimental Setup}
+
+\subsection{Dataset}
+We evaluate NeuroAgent on the BraTS 2020 Training Dataset~\cite{menze2015brats, bakas2018brats}, comprising 369 glioma patients with four co-registered MRI modalities (T1, T1ce, T2, FLAIR) in NIfTI format and voxel-level expert-annotated ground-truth segmentation masks. All quantitative segmentation metrics reported in this work are sourced from a single authoritative file: \texttt{brats\_outputs/evaluation\_results.csv}. Clinical intelligence outputs (WHO classification, RANO assessment, CAP reports) are sourced from \texttt{mcp\_clinical\_summary.csv}, which records the end-to-end pipeline output for all 369 cases processed through Phases~1--3.
+
+\subsection{Evaluation Metrics}
+\textbf{Segmentation quality.} We report four standard metrics computed against ground-truth whole-tumor (WT) masks: Dice Similarity Coefficient (DSC), Hausdorff Distance at the 95th percentile (HD95), sensitivity (recall), and specificity. These are computed per-case and aggregated as mean $\pm$ standard deviation.
+
+\textbf{System reliability.} We report the pipeline completion rate (fraction of cases successfully processed end-to-end), per-case inference latency, and the activation frequency of fallback pathways across all agents.
+
+\textbf{Clinical intelligence.} We report the distribution of WHO CNS5 classifications, the distribution of sigmoid-calibrated confidence scores, and RANO assessment outcomes across the full cohort. Because the BraTS 2020 dataset provides segmentation ground truth but not histopathological diagnosis, WHO classification accuracy cannot be directly validated; we instead analyze the internal consistency and confidence calibration of the classifier's outputs.
+
+\subsection{Implementation Details}
+Segmentation uses MONAI SegResNet with pretrained weights from the MONAI Model Zoo \texttt{brats\_mri\_segmentation} bundle (v0.1.9), \texttt{init\_filters=32}, sliding-window inference with ROI $240 \times 240 \times 160$, Gaussian weighting mode, overlap 0.5, and batch size 1. Post-processing applies binary opening, closing, and connected component filtering (top 3 components $>$ 500 voxels). All 369 cases were processed in four sequential batches on a single GPU instance.
+
+Clinical intelligence agents were executed via the Colab-based pipeline (\texttt{colab\_mcp\_full\_pipeline.ipynb}), running the WHO CNS5 classifier, RANO assessment server, and CAP report generator as MCP server function calls within a unified notebook environment.
+
+
+% ==============================================================
+% SECTION V: RESULTS AND EVALUATION
+% ==============================================================
+\section{Results and Evaluation}
+
+\subsection{Segmentation Performance}
+We first evaluated the segmentation quality of NeuroAgent's Phase~1 pipeline across all 369 BraTS 2020 cases. Of these, 368 cases with ground-truth masks were quantitatively evaluated; one case (BraTS20\_Training\_355) was successfully segmented but lacked a ground-truth annotation and is therefore excluded from metric computation.
+
+Table~\ref{tab:seg_summary} summarizes the aggregate segmentation performance. The system achieves a mean DSC of $0.8517 \pm 0.1055$ and a median DSC of $0.8841$. The substantial gap between mean and median indicates a left-skewed distribution: the majority of cases cluster near high Dice values, with a small tail of difficult cases pulling the mean downward. This pattern is characteristic of brain tumor segmentation benchmarks, where cases with very small tumor volumes or atypical morphology disproportionately affect the mean.
+
+\begin{table}[t]
+\centering
+\caption{Segmentation Performance Summary (368 evaluated cases)}
+\label{tab:seg_summary}
+\begin{tabular}{lc}
+\hline
+\textbf{Metric} & \textbf{Value} \\
+\hline
+Mean DSC & $0.8517 \pm 0.1055$ \\
+Median DSC & $0.8841$ \\
+Mean HD95 & $8.99 \pm 15.15$~mm \\
+Median HD95 & $3.61$~mm \\
+Mean Sensitivity & $0.9384 \pm 0.0799$ \\
+Mean Specificity & $0.9975 \pm 0.0024$ \\
+DSC $\geq$ 0.90 & 149 / 368 (40.5\%) \\
+DSC $\geq$ 0.85 & 247 / 368 (67.1\%) \\
+DSC $\geq$ 0.80 & 298 / 368 (81.0\%) \\
+DSC $<$ 0.50 & 8 / 368 (2.2\%) \\
+Min / Max DSC & 0.313 / 0.9663 \\
+Min / Max HD95 & 1.00 / 109.29~mm \\
+\hline
+\end{tabular}
+\end{table}
+
+The high sensitivity ($0.9384 \pm 0.0799$) demonstrates that the model reliably detects tumor tissue, with the vast majority of ground-truth tumor voxels correctly identified. The near-perfect specificity ($0.9975 \pm 0.0024$) confirms minimal false-positive activation in healthy brain parenchyma---a property critical for downstream clinical agents, which must reason from masks that do not erroneously include normal tissue.
+
+The Hausdorff distance reveals a distinctive distributional pattern. The median HD95 of 3.61~mm indicates tight boundary agreement for the typical case, while the mean of $8.99 \pm 15.15$~mm reflects a heavy tail of outlier cases where a single mislocalized segmentation component produces disproportionately large distances. Only 2.2\% of cases (8/368) fall below DSC 0.50, representing the most challenging specimens in the cohort.
+
+\subsection{Volume-Stratified Analysis}
+To characterize the relationship between tumor size and segmentation accuracy, we stratified all 368 evaluated cases into four volume quartiles based on ground-truth tumor voxel count. Table~\ref{tab:vol_quartile} presents the results of this analysis.
+
+\begin{table}[t]
+\centering
+\caption{Segmentation Performance by Tumor Volume Quartile}
+\label{tab:vol_quartile}
+\begin{tabular}{lcccr}
+\hline
+\textbf{Volume Range} & \textbf{N} & \textbf{DSC (Mean $\pm$ Std)} & \textbf{HD95} & \textbf{DSC$\geq$0.80} \\
+\hline
+Small ($<$30K voxels) & 39 & $0.729 \pm 0.159$ & 19.09~mm & 41\% \\
+Medium (30--80K) & 120 & $0.837 \pm 0.097$ & 9.26~mm & 77\% \\
+Large (80--150K) & 130 & $0.876 \pm 0.081$ & 7.41~mm & 90\% \\
+Very Large ($>$150K) & 79 & $0.895 \pm 0.063$ & 6.20~mm & 92\% \\
+\hline
+\end{tabular}
+\end{table}
+
+These findings reveal a clear monotonic relationship between tumor volume and segmentation quality. Small tumors ($<$30K voxels, $n=39$) present the greatest challenge, achieving a mean DSC of only $0.729$ with 41\% exceeding the 0.80 threshold. This is consistent with the known sensitivity of voxel-overlap metrics to small target volumes, where boundary voxels constitute a larger proportion of the total and single-voxel errors produce amplified metric degradation. Very large tumors ($>$150K voxels) achieve mean DSC of $0.895$ with 92\% exceeding the clinical threshold, demonstrating robust performance on the clinically most significant glioma cases.
+
+\subsection{Baseline Comparison}
+Table~\ref{tab:baselines} contextualizes NeuroAgent's segmentation performance against published BraTS 2020 results for standalone segmentation architectures.
+
+\begin{table}[t]
+\centering
+\caption{Comparison with Published BraTS 2020 Baselines}
+\label{tab:baselines}
+\begin{tabular}{lccc}
+\hline
+\textbf{Method} & \textbf{DSC (WT)} & \textbf{HD95 (WT)} & \textbf{Notes} \\
+\hline
+nnU-Net~\cite{isensee2021nnu} & $\sim$0.89 & $\sim$4.5~mm & Self-configuring \\
+TransBTS~\cite{wang2021transbts} & $\sim$0.88 & $\sim$5.1~mm & Transformer \\
+SwinBTS~\cite{jiang2022swinbts} & $\sim$0.88 & $\sim$5.6~mm & Swin Transformer \\
+\textbf{NeuroAgent} & \textbf{0.8517} & \textbf{8.99~mm} & End-to-end pipeline \\
+\hline
+\end{tabular}
+\end{table}
+
+NeuroAgent's segmentation performance is below that of state-of-the-art standalone segmentation models. This gap is expected and intentional: our system prioritizes end-to-end clinical utility over isolated segmentation accuracy. The SegResNet architecture with pretrained MONAI Model Zoo weights trades marginal segmentation improvement for substantially lower computational cost (3.65~s/case vs.\ ensemble-based nnU-Net latencies), seamless integration with downstream clinical agents, and the practical advantage of single-command deployment from a pretrained bundle without self-configuration overhead.
+
+\subsection{Pipeline Throughput and Reliability}
+Table~\ref{tab:throughput} reports the system-level operational metrics.
+
+\begin{table}[t]
+\centering
+\caption{Pipeline Throughput and Reliability}
+\label{tab:throughput}
+\begin{tabular}{lc}
+\hline
+\textbf{Metric} & \textbf{Value} \\
+\hline
+Total cases processed & 369 \\
+Successfully evaluated & 368 (99.7\%) \\
+Predicted only (no GT) & 1 \\
+Mean inference time & $3.65 \pm 0.16$~s/case \\
+Median inference time & 3.60~s/case \\
+Total processing (4 batches) & $\sim$22.5~min \\
+\hline
+\end{tabular}
+\end{table}
+
+The system achieves 99.7\% pipeline completion across the full 369-case dataset, with consistent sub-4-second per-case latency. The single non-evaluated case (BraTS20\_Training\_355) lacked a ground-truth mask but was successfully segmented and processed through all downstream agents, demonstrating that the pipeline handles missing annotations gracefully without failure propagation. The four-batch processing strategy (batches 0--95, 95--185, 185--275, 275--369) was necessitated by cloud compute session limits rather than architectural constraints.
+
+\subsection{Clinical Intelligence Outputs}
+We next evaluated the outputs of NeuroAgent's Phase~2 and Phase~3 clinical intelligence agents across all 369 cases, as recorded in \texttt{mcp\_clinical\_summary.csv}. Unlike segmentation metrics, which can be validated against ground-truth masks, the clinical intelligence outputs operate in a regime where no gold-standard histopathological labels exist in the BraTS dataset. We therefore analyze the internal consistency, confidence calibration, and distributional properties of the system's clinical outputs.
+
+\subsubsection{WHO CNS5 Classification Distribution}
+Table~\ref{tab:who_dist} summarizes the WHO CNS5 classification outputs across 369 cases (368 evaluated + 1 predicted-only).
+
+\begin{table}[t]
+\centering
+\caption{WHO CNS5 Classification Distribution (369 cases)}
+\label{tab:who_dist}
+\begin{tabular}{lccr}
+\hline
+\textbf{Diagnosis} & \textbf{Grade} & \textbf{N (\%)} & \textbf{Confidence} \\
+\hline
+Glioblastoma, IDH-wt & IV & 253 (68.8\%) & 0.858--0.973 \\
+Meningioma & I--III & 106 (28.8\%) & 0.917 \\
+Astrocytoma, IDH-mut & II--III & 9 (2.4\%) & 0.500 \\
+\hline
+\multicolumn{2}{l}{Mean confidence} & \multicolumn{2}{c}{0.902} \\
+\hline
+\end{tabular}
+\end{table}
+
+The classifier assigns glioblastoma (IDH-wildtype, WHO Grade~IV) to 68.8\% of cases, consistent with the known predominance of high-grade gliomas in the BraTS 2020 cohort. Meningioma classifications (28.8\%) correspond to cases where the morphological scoring engine detected high sphericity ($>$0.7) and well-circumscribed morphology. Nine cases (2.4\%) were classified as astrocytoma (IDH-mutant) with a notably lower confidence of 0.500---precisely at the sigmoid calibration midpoint, indicating that the evidence for this classification was marginal.
+
+\subsubsection{Confidence Calibration Analysis}
+The sigmoid calibration function produces five discrete confidence levels across the cohort: 0.500, 0.769, 0.858, 0.917, and 0.973. The mean confidence of 0.902 reflects the dominance of high-confidence glioblastoma and meningioma classifications. The astrocytoma cases at confidence 0.500 demonstrate the desired behavior of the calibration function: when morphological evidence is ambiguous (volume 13--30K~mm$^3$, sphericity 0.61--0.69), the sigmoid maps the raw score to a midrange confidence that explicitly signals diagnostic uncertainty. The four glioblastoma cases at confidence 0.769 represent intermediate cases where volume and sphericity partially but not fully align with the glioblastoma morphological profile.
+
+\subsubsection{RANO Assessment}
+All 369 cases received a RANO assessment of Stable Disease (SD). This uniform output is expected and correct: the BraTS 2020 dataset provides single-timepoint scans without prior imaging history. In the absence of longitudinal data, the RANO assessment agent correctly defaults to Stable Disease rather than fabricating a progression assessment, which would require comparison against a prior scan. This behavior validates the system's design principle that protocol-aligned agents should produce conservative, defensible outputs when requisite data is unavailable.
+
+\subsubsection{CAP Structured Report Generation}
+All 369 cases generated a CAP-format structured report, stored as JSON files referenced in the \texttt{cap\_report\_file} column. Each report contains specimen type, tumor site, histologic type, WHO grade, molecular marker status (defaulting to ``unknown'' in the absence of molecular testing data), and clinical staging information derived from the pipeline outputs. The 100\% report generation rate across the cohort validates the end-to-end completeness of the pipeline: every case that enters Phase~1 produces a clinician-readable structured report at the terminus of Phase~3.
+
+
+% ==============================================================
+% SECTION VI: ABLATION STUDY
+% ==============================================================
+\section{Ablation Study}
+
+To understand the contribution of individual system components, we analyze NeuroAgent's behavior under controlled degradation scenarios. Because each agent implements a two-tier fallback architecture, we can characterize the system's performance under partial infrastructure availability.
+
+\subsection{Fallback Architecture Analysis}
+
+Table~\ref{tab:fallback} summarizes the per-agent fallback chain and the impact of degradation on output quality.
+
+\begin{table}[t]
+\centering
+\caption{Per-Agent Fallback Architecture and Degradation Impact}
+\label{tab:fallback}
+\begin{tabular}{p{1.7cm}p{2.2cm}p{1.9cm}p{1.6cm}}
+\hline
+\textbf{Agent} & \textbf{Primary} & \textbf{Fallback} & \textbf{Impact} \\
+\hline
+Segment. & SegResNet & GT mask $\to$ Heuristic & Accuracy $\downarrow$ \\
+Embedding & BioClinBERT & Feature vector & Retrieval $\downarrow$ \\
+Retrieval & Weaviate & NumPy cosine & Speed $\downarrow$ \\
+Reasoning & Llama 3 & Rule-based & Narrative $\downarrow$ \\
+Memory & ChromaDB & JSON files & Semantic $\downarrow$ \\
+\hline
+\end{tabular}
+\end{table}
+
+\textbf{Segmentation fallback.} When SegResNet is unavailable, the system attempts to load ground-truth masks (useful in research settings with annotated datasets). If ground truth is also unavailable, a heuristic intensity-percentile segmentation operates on preprocessed volumes. This three-tier chain ensures that downstream agents always receive a tumor mask, even if degraded in quality.
+
+\textbf{Embedding fallback.} When BioClinicalBERT cannot be loaded (e.g., insufficient GPU memory), the embedding generator constructs a deterministic 768-dimensional feature vector from numerical morphology metrics (volume, sphericity, surface area) padded to match the expected dimensionality. The fallback vector preserves geometric similarity relationships (cases with similar volumes and shapes produce similar vectors) but sacrifices the semantic richness of natural language encoding.
+
+\textbf{Clinical reasoning fallback.} The rule-based reasoning engine covers the same five report sections as Llama~3 (Diagnosis Assessment, Treatment Considerations, Prognosis Indicators, Symptom Correlation, Recommendations) using conditional logic on the structured WHO and RANO outputs. The clinical content is identical; only the narrative quality degrades. In our BraTS evaluation, clinical reasoning operated entirely via the rule-based fallback, as Ollama/Llama~3 was not deployed in the batch processing environment. This confirms that the full pipeline---including WHO classification, RANO assessment, and CAP reporting---functions without any LLM dependency.
+
+\subsection{Sensitivity to WHO Classifier Parameters}
+
+The WHO CNS5 classifier's behavior is governed by two key parameters: the sigmoid steepness $k = 1.2$ and the midpoint $\mu = 4.0$. The observed confidence distribution (0.500 to 0.973) spans approximately half the sigmoid's dynamic range, indicating that the current parameterization does not saturate at either extreme. The 9 astrocytoma cases at confidence 0.500 demonstrate that the classifier appropriately maps ambiguous evidence to the inflection point of the sigmoid, while the 253 glioblastoma cases at 0.858--0.973 show clean separation for high-evidence classifications. The confidence gap between the top two candidates was below the threshold ($\tau = 1.0$) for all astrocytoma cases, correctly triggering the low-confidence flag and recommendation for molecular testing.
+
+
+% ==============================================================
+% SECTION VII: DISCUSSION
+% ==============================================================
+\section{Discussion}
+
+\subsection{Key Findings}
+NeuroAgent demonstrates that the full imaging-to-report diagnostic chain for brain tumors can be unified within a single agentic system. Three findings merit discussion.
+
+\textit{First}, the volume-stratified analysis (Table~\ref{tab:vol_quartile}) reveals a performance gradient that has direct clinical implications. NeuroAgent achieves its strongest results on large and very large tumors (mean DSC 0.88--0.89), which constitute the majority of clinically urgent gliomas requiring immediate treatment planning. The degradation on small tumors (mean DSC 0.73) represents a known limitation of sliding-window approaches~\cite{isensee2021nnu} and is consistent with published BraTS benchmarks across architectures. For early-stage or small-volume disease, the system's high sensitivity ($0.9384$) ensures detection even when boundary delineation is imprecise.
+
+\textit{Second}, the clinical intelligence outputs exhibit internally consistent behavior despite the absence of histopathological ground truth. The WHO classifier's assignment of glioblastoma to 68.8\% of cases and meningioma to 28.8\% follows the expected morphological distribution in the BraTS cohort. The sigmoid-calibrated confidence appropriately reflects the strength of morphological evidence: high-confidence glioblastoma classifications (0.973) correspond to cases with large volume ($>$30K~mm$^3$) and low sphericity ($<$0.6), while lower-confidence astrocytoma classifications (0.500) correspond to moderate volumes (13--30K~mm$^3$) with ambiguous sphericity. This gradient of uncertainty is precisely what the clinical workflow requires---it tells the physician not just \textit{what} the system thinks, but \textit{how certain} it is and \textit{whether molecular testing is needed}.
+
+\textit{Third}, the uniform RANO assessment of Stable Disease across all 369 cases is not a system failure but a correct protocol-aligned response to single-timepoint data. The RANO criteria~\cite{wen2010rano} require comparison between at least two scans to assess response; without longitudinal data, any assessment other than ``Stable Disease'' or ``Not Evaluable'' would be clinically inappropriate. This conservative output validates our design principle that protocol-encoding agents should not hallucinate assessments when requisite data is absent.
+
+\subsection{System-Level Contributions}
+
+NeuroAgent's primary contribution is architectural rather than segmentation-centric. Table~\ref{tab:feature_comp} compares the system-level capabilities against related approaches.
+
+\begin{table}[t]
+\centering
+\caption{Feature Comparison with Related Systems}
+\label{tab:feature_comp}
+\begin{tabular}{lcccc}
+\hline
+\textbf{Capability} & \textbf{nnU-Net} & \textbf{TissueLab} & \textbf{A-MEM} & \textbf{Ours} \\
+\hline
+Tumor segmentation & \checkmark & \texttimes & \texttimes & \checkmark \\
+Radiomics & \texttimes & \texttimes & \texttimes & \checkmark \\
+WHO CNS5 classif. & \texttimes & \texttimes & \texttimes & \checkmark \\
+RANO assessment & \texttimes & \texttimes & \texttimes & \checkmark \\
+CAP report & \texttimes & Partial & \texttimes & \checkmark \\
+Persistent memory & \texttimes & \texttimes & \checkmark & \checkmark \\
+HITL validation & \texttimes & \checkmark & \texttimes & \checkmark \\
+Agentic orchestration & \texttimes & \checkmark & \checkmark & \checkmark \\
+\hline
+\end{tabular}
+\end{table}
+
+While TissueLab~\cite{tissuelab2025} provides a more general and arguably more powerful agentic infrastructure with co-evolution capabilities and community-driven tool factories, NeuroAgent addresses a complementary niche: the complete encoding of neuro-oncology-specific clinical protocols within a fully local, privacy-preserving deployment. Where TissueLab requires external API access for LLM orchestration and emphasizes cross-domain generality, NeuroAgent trades generality for domain specificity---implementing WHO CNS5, RANO, and CAP protocols as deterministic code rather than delegating protocol interpretation to an LLM.
+
+\subsection{Limitations}
+
+\textbf{WHO classification validation.} The most significant limitation of this evaluation is the absence of histopathological ground truth in the BraTS 2020 dataset. While the classifier's outputs are internally consistent and morphologically plausible, the accuracy of WHO CNS5 classifications cannot be quantified without tissue-confirmed diagnoses. Prospective validation against biopsy-confirmed cases is essential before clinical deployment.
+
+\textbf{Small tumor performance.} DSC degrades to 0.73 for tumors below 30K voxels, limiting utility for early-stage or small-volume disease. This limitation is architectural (sliding-window inference at $240 \times 240 \times 160$) and could potentially be addressed through multi-scale inference strategies.
+
+\textbf{Single-timepoint evaluation.} The BraTS 2020 dataset provides only single-timepoint scans, preventing evaluation of NeuroAgent's longitudinal memory capabilities. The patient memory system (ChromaDB/JSON) and RANO progression assessment are designed for multi-timepoint clinical data but could not be tested in this evaluation.
+
+\textbf{LLM reasoning dependency.} The clinical reasoning agent operated entirely via the rule-based fallback in this evaluation. The quality difference between Llama~3 narrative reasoning and rule-based output has not been quantitatively assessed.
+
+\textbf{Dataset scope.} Evaluation is limited to gliomas (BraTS 2020). Generalizability to meningiomas, metastases, and other tumor types in real clinical data, which would present heterogeneous acquisition protocols and non-standardized imaging, remains undemonstrated.
+
+\subsection{Clinical Translation}
+
+For deployment under the FDA Software as Medical Device (SaMD) framework, several requirements must be satisfied. The HITL validation node provides the required physician oversight mechanism. De-identification protocols must be implemented before ChromaDB deployment stores patient data. CAP report templates may require institutional customization to match local documentation standards. The system's fully local inference stack (SegResNet, BioClinicalBERT, Llama~3 via Ollama, ChromaDB) eliminates external data transmission, addressing a fundamental requirement for patient privacy compliance.

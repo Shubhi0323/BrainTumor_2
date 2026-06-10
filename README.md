@@ -48,6 +48,47 @@ The system processes brain MRI scans through three phases:
 └── docker-compose.yml
 ```
 
+## ▶ Quick Start on Google Colab (Recommended)
+
+Run the full NeuroAgent pipeline on a free T4 GPU using Google Colab in 4 steps.
+
+### Step 1 — Add BraTS 2020 Dataset via Kaggle
+In your Colab notebook, use the Kaggle dataset panel on the left sidebar to add:
+```
+Dataset: awsaf49/brats2020-training-data
+```
+This mounts the data at `/kaggle/input/brats2020-training-data/` automatically.
+
+### Step 2 — Clone Your GitHub Repo
+```python
+# Colab Cell 1
+!git clone https://github.com/<your-username>/brain-tumor.git /content/brain-tumor
+%cd /content/brain-tumor
+```
+
+### Step 3 — Set the Data Path and Run the Script
+```python
+# Colab Cell 2
+import os
+# Point to where Kaggle mounted BraTS data
+os.environ["DATA_DIR"] = "/kaggle/input/brats2020-training-data/BraTS2020_TrainingData/MICCAI_BraTS2020_TrainingData"
+!bash colab_start.sh
+```
+
+### Step 4 — Open the UI
+The script will print a public ngrok URL at the end, e.g.:
+```
+✓ NeuroAgent is LIVE!
+🌐 Open this URL in your browser:
+👉  https://xxxx-xxxx.ngrok.io
+```
+Click that URL to open the Streamlit dashboard.
+
+> **Note:** `llama3` (~4 GB) is downloaded on first run. This takes 5–10 minutes.  
+> **Note:** Keep the Colab session alive to maintain the tunnel.
+
+---
+
 ## Quick Start with Docker Compose
 
 ### Prerequisites

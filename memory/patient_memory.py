@@ -210,8 +210,15 @@ def store_doctor_feedback_json(output_dir: str, patient_id: str, feedback: dict)
 
 def store_patient_scan(patient_id: str, scan_data: dict,
                        output_dir: str, embedding: list = None):
-    """Store patient scan data in memory (ChromaDB or JSON fallback)."""
-    if CHROMADB_AVAILABLE:
+    """Store patient scan data in memory (ChromaDB or JSON fallback).
+
+    ChromaDB is only used when a 768-dim embedding is available — this
+    keeps the collection's HNSW index consistent and avoids dimension
+    mismatches caused by ChromaDB's built-in 384-dim default model.
+    Records without embeddings go to the JSON flat-file backend.
+    """
+    has_embedding = embedding and len(embedding) >= 768
+    if CHROMADB_AVAILABLE and has_embedding:
         try:
             client = _get_client(os.path.join(output_dir, "chromadb"))
             store_patient_scan_chroma(client, patient_id, scan_data, embedding)
@@ -224,14 +231,29 @@ def store_patient_scan(patient_id: str, scan_data: dict,
 
 
 def retrieve_patient_history(patient_id: str, output_dir: str) -> list:
-    """Retrieve patient scan history (ChromaDB or JSON fallback)."""
+    """Retrieve patient scan history, merging ChromaDB and JSON backends.
+
+    Since scans without embeddings are stored in JSON and scans with
+    768-dim embeddings are stored in ChromaDB, both backends are queried
+    and their results are combined and sorted by scan_date descending.
+    """
+    history = []
+
     if CHROMADB_AVAILABLE:
         try:
             client = _get_client(os.path.join(output_dir, "chromadb"))
-            return retrieve_patient_history_chroma(client, patient_id)
+            history = retrieve_patient_history_chroma(client, patient_id)
         except Exception as e:
             print(f"  [WARNING] ChromaDB retrieval failed: {e}")
-    return retrieve_patient_history_json(output_dir, patient_id)
+
+    # Always merge with JSON backend (catches records stored without embeddings)
+    json_history = retrieve_patient_history_json(output_dir, patient_id)
+    if json_history:
+        history = history + json_history
+        history.sort(key=lambda x: x.get("scan_date", ""), reverse=True)
+
+    return history
+
 
 
 def store_doctor_feedback(patient_id: str, feedback: dict, output_dir: str):

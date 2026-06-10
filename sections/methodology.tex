@@ -1,0 +1,124 @@
+% ==============================================================
+% SECTION III: PROPOSED SYSTEM ARCHITECTURE & METHODOLOGY
+% ==============================================================
+\section{Proposed System Architecture}
+
+NeuroAgent is designed as a directed acyclic graph (DAG) of specialized reasoning agents, orchestrated via LangGraph~\cite{langgraph2024}. Unlike monolithic vision-language models that suffer from attention dilution over gigapixel or volumetric inputs, our architecture decouples the execution layer (domain-specific vision and feature extraction tools) from the orchestration layer (the agentic state machine). This design ensures computational scalability and allows each agent to operate on a standardized, high-density typed state.
+
+\subsection{State Representation and Workflow Planner}
+
+The core workflow is governed by a persistent state contract, denoted as $\mathcal{S}_t$, which accumulates outputs sequentially across eight agent nodes spanning three phases. Formally, let $G = (\mathcal{V}, \mathcal{E})$ be the agentic state machine where $\mathcal{V}$ is the set of specialized agent nodes and $\mathcal{E}$ represents the directed edges defining execution dependencies. 
+
+For any node $v \in \mathcal{V}$, the execution function $f_v$ applies a domain-specific transformation to the incoming state:
+\begin{equation}
+\mathcal{S}_{t+1} = f_v(\mathcal{S}_t) \cup \mathcal{S}_t
+\end{equation}
+where $\mathcal{S}_0$ is the initial state containing the raw MRI study parameters and $\mathcal{S}_{|V|}$ is the terminal state containing the fully structured CAP pathology report and generated visualization artifacts. 
+
+The state dictionary strictly enforces typing, maintaining provenance for all derived data. The planner utilizes topological sorting to ensure that downstream agents (e.g., the Clinical Reasoning agent) only execute once requisite upstream states (e.g., WHO Classification and RANO Assessment) are populated.
+
+\subsection{Phase 1: Imaging Intelligence and Feature Extraction}
+
+The input to Phase 1 is a multi-modal MRI study $X = \{X_{T1}, X_{T1ce}, X_{T2}, X_{FLAIR}\}$. 
+After N4 bias field correction, skull stripping, and isotropic resampling, we deploy a MONAI SegResNet architecture initialized with pretrained weights from the MONAI Model Zoo. Let $M_\theta$ denote the segmentation model parameterized by $\theta$. The model predicts a probability mask for the enhancing tumor (ET), tumor core (TC), and whole tumor (WT):
+\begin{equation}
+\hat{Y} = \sigma(M_\theta(X)) > 0.5
+\end{equation}
+where $\sigma$ is the sigmoid activation function applied over sliding windows of size $240 \times 240 \times 160$ with Gaussian weighting. 
+
+Following segmentation, PyRadiomics~\cite{vangriethuysen2017radiomics} extracts a high-dimensional phenotypic feature vector $\mathbf{r} \in \mathbb{R}^{d}$, capturing shape, first-order intensity, and texture characteristics. This quantitative vector $\mathbf{r}$ grounds all subsequent agentic reasoning.
+
+\subsection{Phase 2: Protocol-Aligned Clinical Intelligence}
+
+\subsubsection{WHO CNS5 Molecular Scoring Engine}
+A fundamental contribution of NeuroAgent is the computational implementation of WHO CNS5 criteria. Let $\mathcal{T} = \{t_1, t_2, \dots, t_n\}$ be the set of candidate tumor types (e.g., glioblastoma, astrocytoma). For each $t \in \mathcal{T}$, the WHO Classification Agent computes a morphological concordance score $s_{morph}(t)$ and a molecular concordance score $s_{mol}(t)$.
+
+The molecular score evaluates the patient's genetic profile $P$ against the expected profile $E_t$ for tumor type $t$:
+\begin{equation}
+s_{mol}(t) = \sum_{m \in P} \begin{cases} 
++\omega_{m}^+ & \text{if } P[m] = E_t[m] \\
+-\omega_{m}^- & \text{if } P[m] \neq E_t[m] \\
+0 & \text{if } P[m] \text{ is unknown}
+\end{cases}
+\end{equation}
+where $\omega_{m}^+$ and $\omega_{m}^-$ are biomarker-specific weights (e.g., IDH status carries a primary weight of 2.0, whereas TP53 carries 1.5).
+
+To prevent overconfident predictions from low raw scores, we introduce a sigmoid-calibrated confidence function. The final confidence $C(t)$ for a candidate $t$ with total score $S_t = s_{morph}(t) + s_{mol}(t)$ is defined as:
+\begin{equation}
+C(t) = \frac{1}{1 + e^{-k(S_t - \mu)}}
+\end{equation}
+where $k = 1.2$ defines the steepness and $\mu = 4.0$ is the threshold midpoint. The system enforces a confidence gap threshold $\tau = 1.0$; if $C(t_{top1}) - C(t_{top2}) < \tau$, a low-confidence flag is raised, explicitly recommending physical molecular testing to the physician.
+
+\subsubsection{Adaptive Case Retrieval via BioClinicalBERT}
+To provide contextual grounding for LLM reasoning, the Similarity Agent transforms the structured clinical state $\mathcal{S}_t$ into a narrative profile and projects it into a dense semantic space using BioClinicalBERT~\cite{alsentzer2019clinical}. 
+
+Let $g(\cdot)$ denote the BERT tokenizer and encoder, and let $\mathbf{h}_{CLS}$ be the hidden state of the \texttt{[CLS]} token. The patient embedding $\mathbf{e}$ is derived via $L_2$ normalization:
+\begin{equation}
+\mathbf{e} = \frac{\mathbf{h}_{CLS}}{\|\mathbf{h}_{CLS}\|_2}, \quad \mathbf{e} \in \mathbb{R}^{768}
+\end{equation}
+To ensure robustness against out-of-distribution textual representations, we define a fallback validation operator. If $\mathbf{e}$ contains $\text{NaN}$, $\text{Inf}$, or if the sparsity exceeds $0.99$, adaptive routing diverts the execution to a deterministic feature-vector pipeline built directly from numerical morphology metrics.
+
+\subsection{Phase 3: Agentic Memory Framework and Co-Evolution}
+
+Inspired by A-MEM~\cite{amem2024}, NeuroAgent implements dynamic clinical memory. The memory system transitions the pipeline from an isolated per-scan inference tool into a continuous, progression-aware clinical assistant.
+
+\subsubsection{Persistent Patient Memory}
+The memory manager utilizes ChromaDB~\cite{chromadb2024} as a vector store with Hierarchical Navigable Small World (HNSW) indexing. For a given patient $p$, the memory database $\mathcal{M}$ stores a chronological sequence of scan snapshots:
+\begin{equation}
+\mathcal{M}_p = \{ (m_1, \mathbf{e}_1), (m_2, \mathbf{e}_2), \dots, (m_t, \mathbf{e}_t) \}
+\end{equation}
+where $m_i$ encapsulates the WHO classification, RANO assessment, and volume severity at time $i$, and $\mathbf{e}_i$ is the corresponding semantic embedding.
+
+When analyzing a new scan at time $t+1$, the memory agent executes an adaptive retrieval query to fetch the patient's historical trajectory. Similarity matching between the current embedding $\mathbf{e}_{t+1}$ and historical embeddings is computed via cosine similarity:
+\begin{equation}
+sim(\mathbf{e}_{t+1}, \mathbf{e}_i) = \frac{\mathbf{e}_{t+1} \cdot \mathbf{e}_i}{\|\mathbf{e}_{t+1}\| \|\mathbf{e}_i\|}
+\end{equation}
+
+\subsubsection{Memory Evolution and Feedback Refinement}
+The Human-in-the-Loop (HITL) Validation Agent allows physicians to inspect the generated state and inject corrections. Let $\Delta_{feedback}$ denote the expert correction. This feedback is immediately appended to $\mathcal{M}_p$, altering the future retrieval landscape:
+\begin{equation}
+\mathcal{M}_p \leftarrow \mathcal{M}_p \cup \{ (\Delta_{feedback}, \mathbf{e}_{feedback}) \}
+\end{equation}
+This establishes a co-evolutionary loop analogous to TissueLab~\cite{tissuelab2025}: the LLM orchestrator learns implicitly from accumulated physician preferences, minimizing repeating errors across longitudinal care.
+
+\subsection{Graceful Degradation and Deterministic Fallback}
+
+A core design principle of NeuroAgent is protocol fidelity regardless of computational infrastructure availability. Every agent node implements a two-tier execution policy. Let $\mathcal{O}_{primary}$ be the primary execution module (e.g., Llama 3 via Ollama for clinical reasoning) and $\mathcal{O}_{fallback}$ be the deterministic fallback (e.g., rule-based conditional logic).
+
+The routing optimization equation for agent execution is defined as:
+\begin{equation}
+f_v(\mathcal{S}) = 
+\begin{cases} 
+\mathcal{O}_{primary}(\mathcal{S}) & \text{if } \text{Status}(\mathcal{O}_{primary}) = \text{online} \\
+\mathcal{O}_{fallback}(\mathcal{S}) & \text{otherwise}
+\end{cases}
+\end{equation}
+For clinical reasoning, if the Ollama endpoint timeouts, $\mathcal{O}_{fallback}$ synthesizes the Diagnosis Assessment, Treatment Considerations, and Prognosis Indicators using explicitly coded decision trees applied over the RANO and WHO outputs. This guarantees that a CAP structured report can always be generated, ensuring uninterrupted clinical utility.
+
+\begin{algorithm}[t]
+\caption{Agentic Execution Pipeline with Fallback Routing}
+\label{alg:execution}
+\begin{algorithmic}[1]
+\REQUIRE Multimodal MRI $X$, Patient ID $p$, Pretrained SegResNet $M_\theta$, Memory DB $\mathcal{M}$
+\ENSURE Structured CAP Report $\mathcal{R}$
+\STATE $\mathcal{S}_0 \leftarrow \text{InitializeState}(p)$
+\STATE $\hat{Y} \leftarrow \text{Threshold}(M_\theta(X), 0.5)$ \hfill \textit{\% Phase 1}
+\STATE $\mathbf{r} \leftarrow \text{PyRadiomics}(\hat{Y}, X)$
+\STATE $\mathcal{S}_1 \leftarrow \mathcal{S}_0 \cup \{\hat{Y}, \mathbf{r}\}$
+\STATE $S_{WHO}, \mathbf{e} \leftarrow \text{WHO\_Agent}(\mathcal{S}_1), \text{Similarity\_Agent}(\mathcal{S}_1)$ \hfill \textit{\% Phase 2}
+\IF{ValidateEmbedding($\mathbf{e}$)}
+    \STATE $TopK \leftarrow \text{RetrieveSimilar}(\mathbf{e}, \mathcal{M})$
+\ELSE
+    \STATE $TopK \leftarrow \text{FallbackRetrieval}(\mathbf{r})$
+\ENDIF
+\STATE $H_{prior} \leftarrow \text{RetrievePatientHistory}(p, \mathcal{M})$ \hfill \textit{\% Phase 3}
+\IF{LLMAvailable()}
+    \STATE $\mathcal{C}_{narrative} \leftarrow \text{Llama3}(\mathcal{S}_1, S_{WHO}, TopK, H_{prior})$
+\ELSE
+    \STATE $\mathcal{C}_{narrative} \leftarrow \text{RuleBasedReasoning}(\mathcal{S}_1, S_{WHO}, H_{prior})$
+\ENDIF
+\STATE $\mathcal{M} \leftarrow \mathcal{M} \cup \text{Store}(\mathbf{e}, \mathcal{C}_{narrative})$ \hfill \textit{\% Memory Evolution}
+\STATE $\mathcal{R} \leftarrow \text{CAP\_Agent}(\mathcal{C}_{narrative})$
+\RETURN $\mathcal{R}$
+\end{algorithmic}
+\end{algorithm}
