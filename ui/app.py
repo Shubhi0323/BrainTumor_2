@@ -531,26 +531,48 @@ with st.sidebar:
     st.markdown("## 🧠 NeuroAgent")
     st.markdown("---")
 
-    # ── Two-tab data source ──────────────────────────────────
-    brats_tab, upload_tab = st.tabs(["🧬 BraTS Dataset", "📤 Upload DICOM"])
+    # ── Three-tab data source ─────────────────────────────────
+    # Tab 1: BraTS / NIfTI local directory
+    # Tab 2: DICOM local directory
+    # Tab 3: DICOM ZIP upload (for Colab / remote)
+    brats_tab, dicom_tab, zip_tab = st.tabs([
+        "🧬 BraTS (NIfTI)",
+        "🗂️ DICOM Dir",
+        "📤 Upload ZIP",
+    ])
 
     with brats_tab:
         default_dir = os.environ.get("DATA_DIR", "")
         brats_dir_input = st.text_input(
-            "BraTS directory path",
+            "BraTS dataset path",
             value=st.session_state.get("brats_dir", default_dir),
             key="brats_dir_widget",
-            help="Folder containing BraTS20_Training_XXX sub-folders (NIfTI format).",
+            help=(
+                "Path to folder containing BraTS20_Training_XXX sub-folders. "
+                "Each sub-folder = one patient (NIfTI format)."
+            ),
         )
         col_a, col_b = st.columns(2)
         with col_a:
             if st.button("📂 Load", use_container_width=True, key="load_brats"):
                 if brats_dir_input and os.path.isdir(brats_dir_input):
-                    st.session_state["active_data_dir"] = brats_dir_input
-                    st.session_state["active_format"]   = "nifti"
-                    st.session_state["brats_dir"]       = brats_dir_input
-                    st.session_state.pop("staged_patient_id", None)
-                    st.rerun()
+                    # Count sub-folders so we can warn immediately if empty
+                    sub_dirs = [
+                        n for n in os.listdir(brats_dir_input)
+                        if os.path.isdir(os.path.join(brats_dir_input, n))
+                        and not n.startswith(".")
+                    ]
+                    if sub_dirs:
+                        st.session_state["active_data_dir"] = brats_dir_input
+                        st.session_state["active_format"]   = "nifti"
+                        st.session_state["brats_dir"]       = brats_dir_input
+                        st.session_state.pop("staged_patient_id", None)
+                        st.rerun()
+                    else:
+                        st.error(
+                            "No patient sub-folders found in that directory. "
+                            "Expected folders like `BraTS20_Training_001`."
+                        )
                 else:
                     st.error("Directory not found.")
         with col_b:
@@ -559,15 +581,58 @@ with st.sidebar:
                     st.session_state.pop(k, None)
                 st.rerun()
 
+        # Auto-tip when DATA_DIR env var is set
         if default_dir and not st.session_state.get("active_data_dir"):
-            st.info(f"DATA_DIR detected:\n`{default_dir}`\n\nClick **Load** to use it.")
+            st.info(
+                f"DATA_DIR env detected:\n`{default_dir}`\n\n"
+                "Click **Load** to use it."
+            )
 
-    with upload_tab:
+    with dicom_tab:
+        dicom_dir_input = st.text_input(
+            "DICOM dataset path",
+            value=st.session_state.get("dicom_dir", ""),
+            key="dicom_dir_widget",
+            help=(
+                "Path to a folder containing patient sub-folders of DICOM (.dcm) files. "
+                "Each immediate sub-folder = one patient."
+            ),
+        )
+        col_c, col_d = st.columns(2)
+        with col_c:
+            if st.button("📂 Load", use_container_width=True, key="load_dicom"):
+                if dicom_dir_input and os.path.isdir(dicom_dir_input):
+                    sub_dirs = [
+                        n for n in os.listdir(dicom_dir_input)
+                        if os.path.isdir(os.path.join(dicom_dir_input, n))
+                        and not n.startswith(".")
+                    ]
+                    if sub_dirs:
+                        st.session_state["active_data_dir"] = dicom_dir_input
+                        st.session_state["active_format"]   = "dicom"
+                        st.session_state["dicom_dir"]       = dicom_dir_input
+                        st.session_state.pop("staged_patient_id", None)
+                        st.rerun()
+                    else:
+                        st.error(
+                            "No patient sub-folders found. "
+                            "Each patient should be a sub-folder containing .dcm files."
+                        )
+                else:
+                    st.error("Directory not found.")
+        with col_d:
+            if st.button("🔄 Reset", use_container_width=True, key="reset_dicom"):
+                for k in ["active_data_dir", "active_format", "dicom_dir", "staged_patient_id"]:
+                    st.session_state.pop(k, None)
+                st.rerun()
+
+    with zip_tab:
+        st.caption("Upload a single patient's DICOM folder as a ZIP file.")
         upload_patient_id = st.text_input(
             "Patient ID", value="uploaded_patient", key="upload_pid"
         )
         uploaded_zip = st.file_uploader(
-            "Patient DICOM folder (ZIP)",
+            "DICOM folder (ZIP)",
             type=["zip"],
             key="zip_upload",
             help="Zip your DICOM series folder and upload here.",
@@ -602,13 +667,24 @@ with st.sidebar:
     if not all_patients:
         if active_data_dir:
             st.warning("No patients found in that directory.")
-            st.info(
-                "For BraTS 2020: the folder should contain sub-folders named "
-                "`BraTS20_Training_001`, etc.\n\n"
-                "Click **Load** after entering the correct path."
-            )
+            if active_format == "nifti":
+                st.info(
+                    "Expected BraTS sub-folder names like `BraTS20_Training_001`.\n\n"
+                    "Make sure you selected the **training root folder** "
+                    "(the one that contains the patient folders), not a patient folder itself."
+                )
+            else:
+                st.info(
+                    "Each patient must be an immediate sub-folder containing `.dcm` files.\n\n"
+                    "If you have a single patient ZIP, use the **Upload ZIP** tab instead."
+                )
         else:
-            st.info("Load a BraTS directory or upload a DICOM ZIP to begin.")
+            st.info(
+                "Pick a data source above:\n"
+                "- **BraTS (NIfTI)** — local BraTS2020 dataset\n"
+                "- **DICOM Dir** — local folder of DICOM patients\n"
+                "- **Upload ZIP** — upload a single patient's DICOM ZIP"
+            )
         st.stop()
 
     # ── Searchable patient selector ──────────────────────────
