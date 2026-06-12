@@ -318,11 +318,54 @@ def get_all_jobs():
     return jobs
 
 
+def _find_brats_patient_root(data_dir):
+    """Return the directory that directly contains BraTS patient folders.
+
+    Handles both flat layouts and Kaggle's nested layout:
+      flat:   <data_dir>/BraTS20_Training_001/  <-- data_dir returned as-is
+      Kaggle: <data_dir>/BraTS2020_TrainingData/MICCAI_BraTS2020_Tr.../BraTS20_Training_001/
+    """
+    def _list_subdirs(path):
+        try:
+            return [
+                n for n in os.listdir(path)
+                if os.path.isdir(os.path.join(path, n)) and not n.startswith(".")
+            ]
+        except Exception:
+            return []
+
+    # Check if patient folders exist directly at data_dir
+    direct_children = _list_subdirs(data_dir)
+    brats_direct = [n for n in direct_children if n.startswith("BraTS")]
+    if brats_direct:
+        return data_dir
+
+    # Walk one level deeper (handles Kaggle top-level wrapper like BraTS2020_TrainingData/)
+    for child in direct_children:
+        child_path = os.path.join(data_dir, child)
+        grandchildren = _list_subdirs(child_path)
+        brats_nested = [n for n in grandchildren if n.startswith("BraTS")]
+        if brats_nested:
+            return child_path
+
+        # Two levels deep (BraTS2020_TrainingData/MICCAI_BraTS2020_TrainingData/BraTS20_Training_XXX)
+        for gc in grandchildren:
+            gc_path = os.path.join(child_path, gc)
+            ggchildren = _list_subdirs(gc_path)
+            brats_deep = [n for n in ggchildren if n.startswith("BraTS")]
+            if brats_deep:
+                return gc_path
+
+    # Fallback: return original directory even if no BraTS folders detected
+    return data_dir
+
+
 def discover_all_patients(format_name, data_dir):
     """Discover all patients from the selected input format.
 
     Supports both NIfTI/BraTS directories (sub-folder per patient) and
     DICOM directories (via dicom_adapter with sub-folder fallback).
+    For BraTS / NIfTI, automatically handles Kaggle's nested folder structure.
     """
     patients = set()
 
@@ -330,9 +373,10 @@ def discover_all_patients(format_name, data_dir):
         return sorted(patients)
 
     if format_name == "nifti":
-        # BraTS: each immediate sub-folder is a patient
-        for name in sorted(os.listdir(data_dir)):
-            if os.path.isdir(os.path.join(data_dir, name)) and not name.startswith("."):
+        # Auto-resolve Kaggle nested layout to the real patient root
+        patient_root = _find_brats_patient_root(data_dir)
+        for name in sorted(os.listdir(patient_root)):
+            if os.path.isdir(os.path.join(patient_root, name)) and not name.startswith("."):
                 patients.add(name)
     else:
         # DICOM: try adapter first, fall back to sub-folder scan
@@ -457,6 +501,34 @@ st.set_page_config(
 # ── Custom CSS ───────────────────────────────────────────────
 st.markdown("""
 <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+    html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+
+    /* ── Sidebar background ── */
+    [data-testid="stSidebar"],
+    [data-testid="stSidebar"] > div:first-child {
+        background-color: #111827 !important;
+    }
+    [data-testid="stSidebar"] .stMarkdown p,
+    [data-testid="stSidebar"] .stMarkdown li,
+    [data-testid="stSidebar"] label,
+    [data-testid="stSidebar"] .stCaption p {
+        color: #9ca3af !important;
+    }
+    [data-testid="stSidebar"] .stMarkdown strong { color: #e5e7eb !important; }
+
+    /* ── Sidebar title ── */
+    .sb-title {
+        font-size: 1.25rem;
+        font-weight: 700;
+        color: #f9fafb;
+        letter-spacing: -0.01em;
+        margin-bottom: 0;
+        padding: 0.25rem 0;
+    }
+
+    /* ── Metric cards (main area) ── */
     .metric-card {
         background: linear-gradient(135deg, #1e1e2e 0%, #2d2d44 100%);
         padding: 1.2rem;
@@ -476,6 +548,8 @@ st.markdown("""
         font-weight: 700;
         margin: 0;
     }
+
+    /* ── Status badges ── */
     .status-badge {
         display: inline-block;
         padding: 0.25rem 0.75rem;
@@ -483,10 +557,86 @@ st.markdown("""
         font-size: 0.8rem;
         font-weight: 600;
     }
-    .badge-green { background: #1a4d2e; color: #4ade80; }
-    .badge-yellow { background: #4d3d1a; color: #facc15; }
-    .badge-red { background: #4d1a1a; color: #f87171; }
-    .badge-blue { background: #1a2d4d; color: #60a5fa; }
+    .badge-green  { background: #052e16; color: #4ade80; }
+    .badge-yellow { background: #422006; color: #facc15; }
+    .badge-red    { background: #450a0a; color: #f87171; }
+    .badge-blue   { background: #0c1a2e; color: #60a5fa; }
+
+    /* ── Pipeline status boxes ── */
+    .pipe-success {
+        background: rgba(74,222,128,0.08);
+        border: 1px solid #22c55e;
+        border-radius: 8px;
+        padding: 0.65rem 1rem;
+        color: #4ade80;
+        font-weight: 600;
+        font-size: 0.88rem;
+        text-align: center;
+        margin: 0.4rem 0;
+    }
+    .pipe-error {
+        background: rgba(248,113,113,0.08);
+        border: 1px solid #ef4444;
+        border-radius: 8px;
+        padding: 0.65rem 1rem;
+        color: #f87171;
+        font-weight: 600;
+        font-size: 0.88rem;
+        text-align: center;
+        margin: 0.4rem 0;
+    }
+    .pipe-running {
+        background: rgba(96,165,250,0.08);
+        border: 1px solid #3b82f6;
+        border-radius: 8px;
+        padding: 0.65rem 1rem;
+        color: #60a5fa;
+        font-weight: 600;
+        font-size: 0.88rem;
+        text-align: center;
+        margin: 0.4rem 0;
+    }
+    .pipe-pending {
+        background: rgba(250,204,21,0.07);
+        border: 1px solid #eab308;
+        border-radius: 8px;
+        padding: 0.65rem 1rem;
+        color: #facc15;
+        font-weight: 600;
+        font-size: 0.88rem;
+        text-align: center;
+        margin: 0.4rem 0;
+    }
+
+    /* ── Nav radio buttons — red filled dot ── */
+    [data-testid="stSidebar"] [role="radiogroup"] label {
+        color: #d1d5db !important;
+        font-size: 0.92rem !important;
+        padding: 0.15rem 0 !important;
+    }
+    [data-testid="stSidebar"] [role="radiogroup"] label:hover {
+        color: #f9fafb !important;
+    }
+    /* unselected ring */
+    [data-testid="stSidebar"] [role="radiogroup"] [data-baseweb="radio"] div:first-child {
+        border-color: #4b5563 !important;
+        background-color: transparent !important;
+        width: 16px !important;
+        height: 16px !important;
+    }
+    /* selected — red fill */
+    [data-testid="stSidebar"] [role="radiogroup"] [aria-checked="true"] [data-baseweb="radio"] div:first-child {
+        border-color: #dc2626 !important;
+        background-color: #dc2626 !important;
+    }
+
+    /* ── Sidebar horizontal divider ── */
+    [data-testid="stSidebar"] hr {
+        border-color: #1f2937;
+        margin: 0.75rem 0;
+    }
+
+    /* ── Section header (main area) ── */
     .section-header {
         border-bottom: 2px solid #3d3d5c;
         padding-bottom: 0.5rem;
@@ -529,36 +679,49 @@ def metric_card(title, value):
 check_running_jobs()
 
 with st.sidebar:
-    st.markdown("## 🧠 Brain Tumor Analysis")
+    st.markdown('<p class="sb-title">🧠 Brain Tumor Analysis</p>', unsafe_allow_html=True)
     st.markdown("---")
 
-    # ── Data source tabs ─────────────────────────────────────
-    brats_tab, dicom_tab, zip_tab = st.tabs(["🧬 BraTS", "🗂️ DICOM Dir", "📤 Upload ZIP"])
+    # ── 2-tab data source selector ────────────────────────────
+    brats_tab, upload_tab = st.tabs(["🧬 BraTS Dataset", "📁 Upload Folder"])
 
+    # ── Tab 1: BraTS / NIfTI dataset (Kaggle or local) ───────
     with brats_tab:
         default_dir = os.environ.get("DATA_DIR", "")
         brats_path = st.text_input(
             "BraTS dataset path",
             value=st.session_state.get("brats_dir", default_dir),
             key="brats_dir_widget",
-            help="Folder containing BraTS20_Training_XXX sub-folders (NIfTI format).",
+            placeholder="/path/to/BraTS2020_TrainingData",
+            help=(
+                "Point to ANY level of the Kaggle BraTS dataset — "
+                "the app will automatically find the BraTS20_Training_XXX patient folders "
+                "even if they are nested inside BraTS2020_TrainingData/MICCAI_BraTS2020_Tr…/."
+            ),
         )
         col_a, col_b = st.columns(2)
         with col_a:
             if st.button("📂 Load", use_container_width=True, key="load_brats"):
                 if brats_path and os.path.isdir(brats_path):
+                    # Resolve actual patient root (handles Kaggle nesting)
+                    resolved = _find_brats_patient_root(brats_path)
                     sub_dirs = [
-                        n for n in os.listdir(brats_path)
-                        if os.path.isdir(os.path.join(brats_path, n)) and not n.startswith(".")
+                        n for n in os.listdir(resolved)
+                        if os.path.isdir(os.path.join(resolved, n)) and not n.startswith(".")
                     ]
                     if sub_dirs:
-                        st.session_state["uploaded_data_dir"] = brats_path
+                        st.session_state["uploaded_data_dir"] = resolved
                         st.session_state["active_format"] = "nifti"
                         st.session_state["brats_dir"] = brats_path
                         st.session_state.pop("uploaded_patient_id", None)
+                        if resolved != brats_path:
+                            st.info(f"Auto-detected patient root:\n`{resolved}`")
                         st.rerun()
                     else:
-                        st.error("No patient sub-folders found. Expected folders like `BraTS20_Training_001`.")
+                        st.error(
+                            "No patient sub-folders found. "
+                            "Make sure the path contains (or leads to) BraTS20_Training_XXX folders."
+                        )
                 else:
                     st.error("Directory not found.")
         with col_b:
@@ -567,69 +730,61 @@ with st.sidebar:
                     st.session_state.pop(k, None)
                 st.rerun()
         if default_dir and not st.session_state.get("uploaded_data_dir"):
-            st.info(f"DATA_DIR detected:\n`{default_dir}`\n\nClick **Load** to use it.")
+            st.info(f"DATA_DIR env detected:\n`{default_dir}`\n\nClick **Load** to use it.")
 
-    with dicom_tab:
-        dicom_path = st.text_input(
-            "DICOM dataset path",
-            value=st.session_state.get("dicom_dir", ""),
-            key="dicom_dir_widget",
-            help="Folder containing patient sub-folders of .dcm files.",
+    # ── Tab 2: Upload a DICOM patient folder from your system ─
+    with upload_tab:
+        st.caption(
+            "Select **all files** inside your patient's DICOM folder "
+            "(open the folder in the dialog, then press **Ctrl+A** / **Cmd+A** to select all)."
         )
-        col_c, col_d = st.columns(2)
-        with col_c:
-            if st.button("📂 Load", use_container_width=True, key="load_dicom"):
-                if dicom_path and os.path.isdir(dicom_path):
-                    sub_dirs = [
-                        n for n in os.listdir(dicom_path)
-                        if os.path.isdir(os.path.join(dicom_path, n)) and not n.startswith(".")
-                    ]
-                    if sub_dirs:
-                        st.session_state["uploaded_data_dir"] = dicom_path
-                        st.session_state["active_format"] = "dicom"
-                        st.session_state["dicom_dir"] = dicom_path
-                        st.session_state.pop("uploaded_patient_id", None)
-                        st.rerun()
-                    else:
-                        st.error("No patient sub-folders found.")
-                else:
-                    st.error("Directory not found.")
-        with col_d:
-            if st.button("🔄 Reset", use_container_width=True, key="reset_dicom"):
-                for k in ["uploaded_data_dir", "active_format", "dicom_dir", "uploaded_patient_id"]:
-                    st.session_state.pop(k, None)
-                st.rerun()
-
-    with zip_tab:
-        st.caption("Upload a single patient's DICOM folder as a ZIP file.")
-        upload_patient_id = st.text_input("Patient ID", value="uploaded_patient")
-        uploaded_zip = st.file_uploader(
-            "Or upload patient folder as ZIP",
-            type=["zip"],
-            accept_multiple_files=False,
-            help="Export or zip your local patient DICOM folder and upload it here.",
+        upload_patient_id_folder = st.text_input(
+            "Patient ID",
+            value="my_patient",
+            key="folder_patient_id",
+            help="A name to identify this patient in the dashboard.",
         )
-        if st.button("Stage ZIP Folder", use_container_width=True):
-            staged_dir, staged_pid, ok_count, bad_count, err = stage_dicom_zip(uploaded_zip, upload_patient_id)
-            if staged_dir and staged_pid:
-                st.session_state["uploaded_data_dir"] = staged_dir
-                st.session_state["uploaded_patient_id"] = staged_pid
-                st.session_state["active_format"] = "dicom"
-                st.success(f"Staged {ok_count} DICOM file(s) from ZIP for patient '{staged_pid}'.")
-                if bad_count:
-                    st.warning(f"Skipped {bad_count} non-DICOM or unreadable file(s).")
-                st.rerun()
+        uploaded_folder_files = st.file_uploader(
+            "DICOM files from patient folder",
+            accept_multiple_files=True,
+            help=(
+                "Navigate into your patient folder, press Ctrl+A (Windows) or "
+                "Cmd+A (Mac) to select all DICOM files, then click Open."
+            ),
+            key="folder_uploader",
+        )
+        if uploaded_folder_files:
+            st.caption(f"{len(uploaded_folder_files)} file(s) selected.")
+        if st.button("⬆️ Stage & Load", use_container_width=True, key="stage_folder_btn", type="primary"):
+            if not uploaded_folder_files:
+                st.error("Please select at least one DICOM file first.")
             else:
-                st.error(err or "Could not stage ZIP folder.")
+                with st.spinner(f"Staging {len(uploaded_folder_files)} file(s)…"):
+                    staged_dir, staged_pid, ok_count, bad_count = stage_uploaded_dicoms(
+                        uploaded_folder_files, upload_patient_id_folder
+                    )
+                if staged_dir and staged_pid:
+                    st.session_state["uploaded_data_dir"] = staged_dir
+                    st.session_state["uploaded_patient_id"] = staged_pid
+                    st.session_state["active_format"] = "dicom"
+                    st.success(f"✅ Staged {ok_count} DICOM file(s) for '{staged_pid}'.")
+                    if bad_count:
+                        st.warning(f"Skipped {bad_count} non-DICOM file(s).")
+                    st.rerun()
+                else:
+                    st.error(
+                        "No readable DICOM files found. "
+                        "Make sure the files you selected are .dcm or standard DICOM format."
+                    )
 
     # ── Resolve active data source ────────────────────────────
     active_data_dir = st.session_state.get("uploaded_data_dir", "")
     active_format   = st.session_state.get("active_format", "dicom")
     staged_pid_single = st.session_state.get("uploaded_patient_id")
     if staged_pid_single:
-        st.caption(f"Staged patient: {staged_pid_single}")
+        st.caption(f"Staged patient: **{staged_pid_single}**")
     if active_data_dir:
-        st.caption(f"Dataset: {active_data_dir}")
+        st.caption(f"Dataset: `{active_data_dir}`")
 
     all_patients = discover_all_patients(active_format, active_data_dir)
     if staged_pid_single and staged_pid_single not in all_patients:
@@ -637,7 +792,7 @@ with st.sidebar:
     processed = find_processed_patients()
 
     if not all_patients:
-        st.warning("No patients found. Load a dataset or upload a ZIP above.")
+        st.warning("No patients found. Load a dataset or upload files above.")
         if active_data_dir:
             st.code(f"Dataset dir: {os.path.abspath(active_data_dir)}")
         st.stop()
@@ -671,21 +826,26 @@ with st.sidebar:
     patient_id = selected_label.split(" ", 1)[1].strip()
 
     running_count = sum(1 for j in get_all_jobs() if j.get("status") == "running")
-    st.caption(f"{len(processed)}/{len(all_patients)} processed" +
-               (f" · {running_count} running" if running_count else ""))
+    st.caption(
+        f"{len(processed)}/{len(all_patients)} processed"
+        + (f" · {running_count} running" if running_count else "")
+    )
     st.markdown("---")
 
     patient_processed = patient_id in processed
     job = get_job_status(patient_id)
     job_status = job.get("status") if job else None
 
-    # Processing controls
+    # ── Pipeline status & controls ───────────────────────────
     if job_status == "running":
-        st.info("⏳ Pipeline is running...")
-        if st.button("🔄 Refresh", use_container_width=True):
+        st.markdown('<div class="pipe-running">⏳ Pipeline is running…</div>', unsafe_allow_html=True)
+        st.markdown("")
+        if st.button("🔄 Refresh", use_container_width=True, key="refresh_running"):
             st.rerun()
+
     elif job_status == "failed" and not patient_processed:
-        st.error("Pipeline failed")
+        st.markdown('<div class="pipe-error">❌ Pipeline failed</div>', unsafe_allow_html=True)
+        st.markdown("")
         log_path = job.get("log_file", "") if job else ""
         if log_path and os.path.exists(log_path):
             with open(log_path) as lf:
@@ -693,7 +853,7 @@ with st.sidebar:
             last_lines = "".join(lines[-10:]) if lines else "No log output"
             with st.expander("Last log lines"):
                 st.code(last_lines, language="text")
-        if st.button("🔄 Retry Pipeline", type="primary", use_container_width=True):
+        if st.button("🔄 Retry Pipeline", type="primary", use_container_width=True, key="retry_btn"):
             retry_data_dir = (job or {}).get("data_dir", active_data_dir)
             retry_format = (job or {}).get("input_format", active_format)
             if start_pipeline_job(patient_id, retry_data_dir, retry_format):
@@ -702,9 +862,11 @@ with st.sidebar:
                 st.rerun()
             else:
                 st.error("Cannot restart: staged data directory not available.")
+
     elif not patient_processed:
-        st.warning("Not yet processed")
-        if st.button("🚀 Run Pipeline", type="primary", use_container_width=True):
+        st.markdown('<div class="pipe-pending">⬚ Not yet processed</div>', unsafe_allow_html=True)
+        st.markdown("")
+        if st.button("🚀 Run Pipeline", type="primary", use_container_width=True, key="run_pipeline_btn"):
             if active_data_dir and os.path.isdir(active_data_dir):
                 if start_pipeline_job(patient_id, active_data_dir, active_format):
                     st.success("Pipeline started in background!")
@@ -713,9 +875,10 @@ with st.sidebar:
                 else:
                     st.error("Failed to start pipeline.")
             else:
-                st.error("Load a dataset or stage a ZIP first.")
+                st.error("Load a dataset or stage files first.")
+
     else:
-        # Processed patient — show info and reprocess option
+        # ── Processed: show meta + status box ────────────────
         report = load_report(patient_id)
         if report:
             meta = report.get("report_metadata", {})
@@ -724,11 +887,11 @@ with st.sidebar:
             has_errors = meta.get("has_errors", False)
             errors = report.get("pipeline_errors", [])
             if has_errors or errors:
-                st.error("Pipeline reported errors")
+                st.markdown('<div class="pipe-error">⚠️ Pipeline reported errors</div>', unsafe_allow_html=True)
             else:
-                st.success("Pipeline completed successfully")
-
-        if st.button("🔄 Reprocess Patient", use_container_width=True):
+                st.markdown('<div class="pipe-success">✅ Pipeline completed successfully</div>', unsafe_allow_html=True)
+        st.markdown("")
+        if st.button("🔄 Reprocess Patient", use_container_width=True, key="reprocess_btn"):
             if start_pipeline_job(patient_id, active_data_dir, active_format):
                 st.success("Reprocessing started in background!")
                 time.sleep(1)
@@ -740,9 +903,17 @@ with st.sidebar:
     st.markdown("### Navigation")
     section = st.radio(
         "Go to",
-        ["Overview", "MRI Visualization", "Radiomics", "Classification",
-         "Clinical Reasoning", "CAP Report", "Processing Status"],
+        [
+            "Overview",
+            "MRI Visualization",
+            "Radiomics",
+            "Classification",
+            "Clinical Reasoning",
+            "CAP Report",
+            "Processing Status",
+        ],
         label_visibility="collapsed",
+        key="nav_radio",
     )
 
 # Load data for processed patients (needed outside sidebar)
