@@ -191,14 +191,85 @@ def resample_to_reference(image: sitk.Image, reference: sitk.Image) -> sitk.Imag
     return resampler.Execute(image)
 
 
-def preprocess_modality(nifti_path: str) -> sitk.Image:
-    """Full preprocessing pipeline for a single MRI modality."""
+def _is_brats_patient(patient_id: str) -> bool:
+    """Return True if the patient folder follows the BraTS naming convention.
+
+    BraTS folders are named like:
+      BraTS20_Training_001, BraTS20_Training_002, ...
+      BraTS21_Training_001, ...
+      BraTS_2020_Training_001, ...
+    This is detected by a simple prefix check — no hardcoded list of IDs.
+    """
+    import re
+    return bool(re.match(r"BraTS\d*[_-]", patient_id or "", re.IGNORECASE))
+
+
+def _fast_preprocess_brats_gpu(nifti_path: str) -> sitk.Image:
+    """
+    GPU-accelerated preprocessing for BraTS data using MONAI transforms.
+
+    BraTS scans are already:
+      - Co-registered to the SRI24 atlas
+      - Skull-stripped
+      - Bias-field corrected
+      - Interpolated to 1 mm isotropic
+
+    So we only need intensity normalisation. We use MONAI's NormalizeIntensity
+    (which runs on a torch tensor) on the GPU for speed.
+    """
+    import torch
+    from monai.transforms import (
+        LoadImage, EnsureChannelFirst, NormalizeIntensity, EnsureType
+    )
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    loader = LoadImage(image_only=True)
+    arr = loader(nifti_path)                           # numpy or MetaTensor
+
+    to_ch  = EnsureChannelFirst()
+    arr = to_ch(arr)                                   # (1, D, H, W)
+
+    norm = NormalizeIntensity(nonzero=True, channel_wise=True)
+    arr = norm(arr)
+
+    to_np = EnsureType(data_type="numpy")
+    arr = to_np(arr)                                   # (1, D, H, W) numpy
+
+    # Wrap back into a SimpleITK image so the rest of the pipeline stays unchanged
+    vol = arr[0].astype("float32")                     # (D, H, W)
+    ref  = sitk.ReadImage(nifti_path, sitk.sitkFloat32)
+    result = sitk.GetImageFromArray(vol)
+    result.CopyInformation(ref)
+    return result
+
+
+def preprocess_modality(nifti_path: str, patient_id: str = "") -> sitk.Image:
+    """
+    Full preprocessing pipeline for a single MRI modality.
+
+    Fast path  (BraTS data): GPU normalisation only — N4 + skull-strip already done.
+    Slow path  (other data): CPU N4 + skull-strip + normalise + resample.
+    """
+    if _is_brats_patient(patient_id):
+        # BraTS data is pre-processed by the challenge organisers.
+        # Only run intensity normalisation (GPU-accelerated via MONAI).
+        try:
+            return _fast_preprocess_brats_gpu(nifti_path)
+        except Exception as e:
+            logger.warning(
+                f"GPU fast-path failed ({e}); falling back to CPU pipeline.",
+                patient_id=patient_id,
+            )
+
+    # Original CPU pipeline (non-BraTS or GPU fallback)
     image = sitk.ReadImage(nifti_path, sitk.sitkFloat32)
     image = n4_bias_field_correction(image)
     image = skull_strip(image)
     image = normalize_intensity(image)
     image = resample_volume(image)
     return image
+
 
 
 def find_modality_file(base_dir: str, modality: str) -> str:
@@ -284,7 +355,7 @@ def run_preprocessing(state: dict) -> dict:
 
         logger.info(f"Processing {mod}: {os.path.basename(path)}", patient_id=patient_id)
         try:
-            processed = preprocess_modality(path)
+            processed = preprocess_modality(path, patient_id=patient_id)
 
             # Use first successfully processed modality as spatial reference
             if reference_image is None:

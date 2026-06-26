@@ -445,6 +445,17 @@ def run_segmentation(state: dict) -> dict:
     except Exception as e:
         logger.warning(f"SegResNet failed: {e}", patient_id=patient_id)
         errors.append(f"SegResNet inference failed for {patient_id}: {e}")
+    finally:
+        # Release GPU VRAM so Ollama can load Llama 3 onto the GPU.
+        # Without this PyTorch keeps ~14 GB reserved and Ollama silently
+        # falls back to CPU, making report generation take 30+ minutes.
+        try:
+            del model
+        except NameError:
+            pass
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            logger.info("Freed GPU cache after segmentation.", patient_id=patient_id)
 
     # --- Strategy 2: Ground-truth ---
     if binary_mask is None:

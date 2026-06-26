@@ -295,10 +295,12 @@ def check_running_jobs():
                            log_file=log_path,
                            **source_meta)
         elif log_path and os.path.exists(log_path):
-            # Fallback: check log staleness (no PID available)
+            # Fallback: check log staleness (no PID available).
+            # Use a 2-hour window so slow CPU preprocessing steps are not
+            # incorrectly marked as failed while still running.
             mtime = os.path.getmtime(log_path)
-            if time.time() - mtime > 600:
-                # Log hasn't been updated in 10 min — likely failed
+            if time.time() - mtime > 7200:
+                # Log hasn't been updated in 2 hours — likely truly failed
                 set_job_status(pid_val, "failed",
                                started_at=job.get("started_at"),
                                finished_at=datetime.now().isoformat(),
