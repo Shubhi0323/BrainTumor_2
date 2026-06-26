@@ -44,7 +44,8 @@ echo ""
 echo "=== [1/7] Installing system dependencies ==="
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends \
-    build-essential gcc g++ libgl1 libglib2.0-0 curl wget unzip zstd
+    build-essential gcc g++ libgl1 libglib2.0-0 curl wget unzip zstd \
+    pciutils lshw
 echo "  ✓ System packages ready."
 
 # ── 3. PYTHON DEPENDENCIES (pinned to avoid conflicts) ───────────────
