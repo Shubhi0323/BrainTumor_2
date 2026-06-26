@@ -236,8 +236,11 @@ def _fast_preprocess_brats_gpu(nifti_path: str) -> sitk.Image:
     to_np = EnsureType(data_type="numpy")
     arr = to_np(arr)                                   # (1, D, H, W) numpy
 
-    # Wrap back into a SimpleITK image so the rest of the pipeline stays unchanged
-    vol = arr[0].astype("float32")                     # (D, H, W)
+    # Wrap back into a SimpleITK image so the rest of the pipeline stays unchanged.
+    # MONAI LoadImage returns NIfTI data in (H, W, D) order, but
+    # sitk.GetImageFromArray expects (Z, Y, X). Transposing corrects the
+    # axis order so the resulting image size matches the reference image.
+    vol = arr[0].transpose(2, 1, 0).astype("float32")  # (Z, Y, X)
     ref  = sitk.ReadImage(nifti_path, sitk.sitkFloat32)
     result = sitk.GetImageFromArray(vol)
     result.CopyInformation(ref)
