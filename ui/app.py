@@ -318,6 +318,73 @@ def get_all_jobs():
     return jobs
 
 
+def _resolve_brats_root(data_dir):
+    """Walk past BraTS dataset wrapper directories to find the actual patient root.
+
+    The Kaggle BraTS2020 download nests patients several levels deep::
+
+        data_dir/
+            BraTS2020_TrainingData/          # wrapper 1
+                MICCAI_BraTS2020_TrainingData/   # wrapper 2
+                    BraTS20_Training_001/    # ← real patient
+                    BraTS20_Training_002/
+                    ...
+
+    This function descends through wrapper directories — those whose only
+    sub-folders are themselves directories without NIfTI files directly
+    inside — until it reaches a directory whose children contain NIfTI
+    files (i.e., real BraTS patient folders).
+
+    Preference is given to directories whose names contain 'Training'
+    (case-insensitive) so ValidationData is skipped automatically.
+
+    Returns the resolved patient root, or the original data_dir if the
+    structure cannot be determined.
+    """
+    def _has_patient_children(d):
+        """True if d contains sub-dirs that themselves hold .nii/.nii.gz files."""
+        try:
+            for child in os.listdir(d):
+                child_path = os.path.join(d, child)
+                if not os.path.isdir(child_path) or child.startswith("."):
+                    continue
+                for f in os.listdir(child_path):
+                    if f.lower().endswith((".nii", ".nii.gz")):
+                        return True
+        except OSError:
+            pass
+        return False
+
+    def _is_wrapper(d):
+        """True if d contains only sub-directories (no NIfTI files at its own level)."""
+        try:
+            entries = [e for e in os.listdir(d) if not e.startswith(".")]
+            if not entries:
+                return False
+            return all(os.path.isdir(os.path.join(d, e)) for e in entries)
+        except OSError:
+            return False
+
+    current = data_dir
+    # Descend up to 4 levels to handle arbitrary nesting.
+    for _ in range(4):
+        if _has_patient_children(current):
+            return current
+        if not _is_wrapper(current):
+            break
+        children = sorted(
+            e for e in os.listdir(current)
+            if os.path.isdir(os.path.join(current, e)) and not e.startswith(".")
+        )
+        if not children:
+            break
+        # Prefer a child whose name contains "Training"; fall back to first child.
+        training = [c for c in children if "training" in c.lower()]
+        current = os.path.join(current, training[0] if training else children[0])
+
+    return current
+
+
 def discover_all_patients(format_name, data_dir):
     """Discover all patients from the selected input format.
 
@@ -330,10 +397,15 @@ def discover_all_patients(format_name, data_dir):
         return sorted(patients)
 
     if format_name == "nifti":
-        # BraTS: each immediate sub-folder is a patient
-        for name in sorted(os.listdir(data_dir)):
-            if os.path.isdir(os.path.join(data_dir, name)) and not name.startswith("."):
+        # Resolve through BraTS wrapper directories before listing patients.
+        patient_root = _resolve_brats_root(data_dir)
+        for name in sorted(os.listdir(patient_root)):
+            if os.path.isdir(os.path.join(patient_root, name)) and not name.startswith("."):
                 patients.add(name)
+        # Store the resolved root so the pipeline receives the correct path.
+        if patient_root != data_dir:
+            import streamlit as _st
+            _st.session_state["_resolved_brats_root"] = patient_root
     else:
         # DICOM: try adapter first, fall back to sub-folder scan
         try:
@@ -352,6 +424,7 @@ def discover_all_patients(format_name, data_dir):
                     patients.add(name)
 
     return sorted(patients)
+
 
 
 def find_processed_patients():
@@ -670,8 +743,11 @@ with st.sidebar:
                 "or switch to **Upload From System**."
             )
 
-        # Resolve active source from BraTS state
-        active_data_dir = st.session_state.get("uploaded_data_dir", "")
+        # Resolve active source from BraTS state.
+        # Use the resolved patient root if discover_all_patients already walked
+        # past wrapper directories (BraTS2020_TrainingData/MICCAI_BraTS2020_*).
+        _raw_dir = st.session_state.get("uploaded_data_dir", "")
+        active_data_dir = st.session_state.get("_resolved_brats_root", _raw_dir)
         active_format = st.session_state.get("active_format", "nifti")
         staged_pid_single = None  # not used in BraTS mode
 
