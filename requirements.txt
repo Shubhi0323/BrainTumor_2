@@ -9,8 +9,11 @@ pandas
 scipy
 scikit-image
 pydicom
-langgraph
-langchain-core
+langchain==0.3.7
+langchain-core==0.3.15
+langchain-community==0.3.7
+langchain-text-splitters==0.3.2
+langgraph==0.2.45
 nilearn
 # DynUNet is provided by monai (already listed above)
 

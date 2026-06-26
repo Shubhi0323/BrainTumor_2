@@ -524,6 +524,78 @@ def metric_card(title, value):
     return f'<div class="metric-card"><h3>{title}</h3><p>{value}</p></div>'
 
 
+# ── Auto-startup dataset initialization ─────────────────────
+_KAGGLE_FALLBACK = "/kaggle/input/brats20-dataset-training-validation"
+
+
+def _auto_init_dataset():
+    """Automatically resolve and load the BraTS dataset on first page render.
+
+    Runs once per Streamlit session (guarded by ``_dataset_initialized`` in
+    session state).  Upload-mode state (``uploaded_patient_id``) is never
+    touched here so ZIP uploads remain completely independent.
+
+    Priority order:
+      1. Session state already has ``uploaded_data_dir`` set → skip (either
+         Load button override or a previous ZIP upload is active).
+      2. ``DATA_DIR`` environment variable (set by colab_start.sh).
+      3. Hardcoded Kaggle input path as a last-resort fallback.
+
+    If the directory exists but is empty (dataset still unpacking), retries
+    up to 3 times with a 2-second pause before giving up.
+    """
+    if st.session_state.get("_dataset_initialized"):
+        return
+    st.session_state["_dataset_initialized"] = True
+
+    # Skip auto-init if the user has already loaded something manually.
+    if st.session_state.get("uploaded_data_dir"):
+        return
+
+    # Resolve candidate path.
+    env_dir = os.environ.get("DATA_DIR", "").strip()
+    candidate = env_dir if env_dir else _KAGGLE_FALLBACK
+
+    if not candidate or not os.path.isdir(candidate):
+        # Neither location exists — surface a friendly message via session state.
+        msg = (
+            f"Dataset directory not found.\n"
+            f"Tried: {candidate or '(none)'}\n"
+            f"Set the DATA_DIR environment variable to your BraTS dataset path "
+            f"and restart Streamlit, or upload a ZIP in the 'Upload ZIP' tab."
+        )
+        st.session_state["_dataset_init_error"] = msg
+        return
+
+    # Retry loop — handles the case where the dataset is still unpacking.
+    sub_dirs = []
+    for attempt in range(3):
+        sub_dirs = [
+            n for n in os.listdir(candidate)
+            if os.path.isdir(os.path.join(candidate, n)) and not n.startswith(".")
+        ]
+        if sub_dirs:
+            break
+        if attempt < 2:
+            time.sleep(2)
+
+    if not sub_dirs:
+        msg = (
+            f"Dataset directory exists but contains no patient sub-folders.\n"
+            f"Path: {candidate}\n"
+            f"The dataset may still be downloading. Reload the page in a moment, "
+            f"or upload a ZIP in the 'Upload ZIP' tab."
+        )
+        st.session_state["_dataset_init_error"] = msg
+        return
+
+    # All good — populate the same session-state keys the Load button sets.
+    st.session_state["uploaded_data_dir"] = candidate
+    st.session_state["active_format"] = "nifti"
+    st.session_state["brats_dir"] = candidate
+    st.session_state.pop("_dataset_init_error", None)
+
+
 # ── Sidebar ──────────────────────────────────────────────────
 # Check running jobs on every page load
 check_running_jobs()
@@ -532,16 +604,29 @@ with st.sidebar:
     st.markdown("## 🧠 Brain Tumor Analysis")
     st.markdown("---")
 
+    # Auto-load the BraTS dataset on first render (no Load button required).
+    _auto_init_dataset()
+
     # ── Data source tabs ─────────────────────────────────────
     brats_tab, dicom_tab, zip_tab = st.tabs(["🧬 BraTS", "🗂️ DICOM Dir", "📤 Upload ZIP"])
 
     with brats_tab:
-        default_dir = os.environ.get("DATA_DIR", "")
+        default_dir = os.environ.get("DATA_DIR", "").strip() or _KAGGLE_FALLBACK
+        active_brats_dir = st.session_state.get("brats_dir", "")
+
+        # Show current auto-loaded path (read-only display).
+        if active_brats_dir and not st.session_state.get("_dataset_init_error"):
+            st.success(f"✅ Dataset loaded automatically")
+            st.caption(active_brats_dir)
+        elif st.session_state.get("_dataset_init_error"):
+            st.warning("⚠️ Auto-load failed — see below")
+
+        # Override text input: lets the user point to a different path.
         brats_path = st.text_input(
-            "BraTS dataset path",
+            "Override path (optional)",
             value=st.session_state.get("brats_dir", default_dir),
             key="brats_dir_widget",
-            help="Folder containing BraTS20_Training_XXX sub-folders (NIfTI format).",
+            help="Leave as-is to use the auto-detected path. Change and click Load to switch datasets.",
         )
         col_a, col_b = st.columns(2)
         with col_a:
@@ -556,6 +641,7 @@ with st.sidebar:
                         st.session_state["active_format"] = "nifti"
                         st.session_state["brats_dir"] = brats_path
                         st.session_state.pop("uploaded_patient_id", None)
+                        st.session_state.pop("_dataset_init_error", None)
                         st.rerun()
                     else:
                         st.error("No patient sub-folders found. Expected folders like `BraTS20_Training_001`.")
@@ -563,11 +649,10 @@ with st.sidebar:
                     st.error("Directory not found.")
         with col_b:
             if st.button("🔄 Reset", use_container_width=True, key="reset_brats"):
-                for k in ["uploaded_data_dir", "active_format", "brats_dir", "uploaded_patient_id"]:
+                for k in ["uploaded_data_dir", "active_format", "brats_dir",
+                          "uploaded_patient_id", "_dataset_initialized", "_dataset_init_error"]:
                     st.session_state.pop(k, None)
                 st.rerun()
-        if default_dir and not st.session_state.get("uploaded_data_dir"):
-            st.info(f"DATA_DIR detected:\n`{default_dir}`\n\nClick **Load** to use it.")
 
     with dicom_tab:
         dicom_path = st.text_input(
@@ -637,9 +722,19 @@ with st.sidebar:
     processed = find_processed_patients()
 
     if not all_patients:
-        st.warning("No patients found. Load a dataset or upload a ZIP above.")
-        if active_data_dir:
-            st.code(f"Dataset dir: {os.path.abspath(active_data_dir)}")
+        init_error = st.session_state.get("_dataset_init_error")
+        if init_error:
+            st.error("⚠️ Could not load dataset automatically")
+            st.markdown(init_error)
+        else:
+            st.warning("No patients found. Load a dataset or upload a ZIP above.")
+            if active_data_dir:
+                st.code(f"Dataset dir: {os.path.abspath(active_data_dir)}")
+        st.markdown(
+            "**To fix:** set the `DATA_DIR` environment variable to your BraTS "
+            "dataset folder and restart Streamlit, or upload a patient ZIP in the "
+            "'Upload ZIP' tab above."
+        )
         st.stop()
 
     # ── Search ────────────────────────────────────────────────
