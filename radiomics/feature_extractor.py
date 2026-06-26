@@ -30,10 +30,10 @@ try:
         if k == "radiomics" or k.startswith("radiomics.")
     }
 
-    # Step 2 — Remove shadow paths.
+    # Step 2 — Remove shadow paths (handle empty string '' which means cwd).
     _shadow_paths = [
         p for p in _sys.path
-        if p and _os.path.isdir(_os.path.join(p, "radiomics"))
+        if _os.path.isdir(_os.path.join(p or ".", "radiomics"))
     ]
     for _p in _shadow_paths:
         _sys.path.remove(_p)
