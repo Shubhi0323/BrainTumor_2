@@ -10,39 +10,42 @@ import numpy as np
 import SimpleITK as sitk
 
 try:
-    # pyradiomics installs as 'radiomics' in site-packages, but this local radiomics/
-    # package shadows it. We load pyradiomics by manipulating sys.path temporarily.
+    # The local radiomics/ package (this folder) shadows the installed
+    # pyradiomics library because both are imported as `import radiomics`.
+    # To load the real library we temporarily remove every sys.path entry
+    # that contains a local radiomics/ subdirectory, do the import, then
+    # restore everything. This works in Docker, Colab, Windows, etc.
     import sys as _sys
+    import os as _os
     import importlib as _importlib
 
-    # Save and remove paths that cause the local radiomics/ to shadow pyradiomics
-    _app_paths = [p for p in _sys.path if p in ("", "/app")]
-    for _p in _app_paths:
+    # Find paths that contain a local radiomics/ directory (the shadow).
+    _shadow_paths = [
+        p for p in _sys.path
+        if p and _os.path.isdir(_os.path.join(p, "radiomics"))
+    ]
+    for _p in _shadow_paths:
         _sys.path.remove(_p)
 
-    # Save this module's entry before we clear the radiomics namespace
-    _this_module = _sys.modules.get(__name__)
-    _this_pkg = _sys.modules.get("radiomics")
-
-    # Clear only the top-level 'radiomics' so importlib finds pyradiomics
-    if "radiomics" in _sys.modules:
-        del _sys.modules["radiomics"]
+    # Also evict any cached radiomics sub-modules from the prior failed import.
+    _stale = [k for k in list(_sys.modules) if k == "radiomics" or k.startswith("radiomics.")]
+    for _k in _stale:
+        del _sys.modules[_k]
 
     try:
         _pyradiomics = _importlib.import_module("radiomics")
         featureextractor = _importlib.import_module("radiomics.featureextractor")
         PYRADIOMICS_AVAILABLE = True
     finally:
-        # Restore sys.path
-        for _p in _app_paths:
+        # Always restore sys.path so the rest of the app can import normally.
+        for _p in _shadow_paths:
             _sys.path.insert(0, _p)
-        # Restore our local module references
-        if _this_pkg is not None:
-            _sys.modules["radiomics"] = _this_pkg
-        if _this_module is not None:
-            _sys.modules[__name__] = _this_module
+        # Re-register this local module so it is not accidentally replaced.
+        _sys.modules.setdefault(__name__, _sys.modules.get(__name__))
+
 except (ImportError, AttributeError, Exception):
     PYRADIOMICS_AVAILABLE = False
+
 
 
 def get_radiomics_params() -> dict:
