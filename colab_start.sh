@@ -26,14 +26,10 @@
 # Do NOT use set -e — pip version conflicts would abort the script
 set +e
 
-# ── 0. DOWNLOAD DATASET ──────────────────────────────────────────────
-echo ""
-echo "=== [0/7] Downloading BraTS Dataset ==="
-pip install -q kagglehub
-export DATA_DIR=$(python3 -c "import kagglehub; print(kagglehub.dataset_download('awsaf49/brats20-dataset-training-validation'))")
-echo "  ✓ Dataset downloaded to: $DATA_DIR"
-
-# ── 1. PATHS ──────────────────────────────────────────────────────────
+# ── 0. PATHS ──────────────────────────────────────────────────
+# NOTE: kagglehub is installed AFTER all LangChain packages are pinned
+# (see step 2 below) so it cannot pull in langchain-core>=1.0 before the
+# ceiling constraint is in place.
 REPO_DIR="/content/brain-tumor"
 OUTPUT_DIR="$REPO_DIR/outputs"
 WEIGHTS_DIR="/content/dynunet_weights"
@@ -67,20 +63,34 @@ pip install --no-cache-dir -q \
     "starlette==0.41.3" \
     "fastapi==0.115.5"
 
-# FIX: Pin cryptography to version compatible with both PyDrive2 and PyOpenSSL
-pip install --no-cache-dir -q "cryptography==42.0.8"
-
-# FIX: Pin langchain-core to version compatible with langchain
-pip install --no-cache-dir -q "langchain-core==0.3.15"
+# FIX: Pin the full LangChain ecosystem with a hard <0.4 ceiling BEFORE
+# requirements.txt runs. The ceiling stops any package (kagglehub,
+# mcp-cli, langgraph-sdk, etc.) from silently upgrading langchain-core
+# to the 1.x series which breaks langchain 0.3.x.
+pip install --no-cache-dir -q \
+    "langchain==0.3.7" \
+    "langchain-core>=0.3.43,<0.4" \
+    "langchain-community==0.3.7" \
+    "langchain-text-splitters==0.3.2" \
+    "langgraph==0.2.45"
 
 # Avoid blinker conflict (Colab pre-installs an older version)
 pip install --no-cache-dir -q --ignore-installed blinker
 
-# Install numpy first
+# Install numpy first (must be <2.0 for MONAI compatibility)
 pip install --no-cache-dir -q "numpy<2.0"
 
-# All other project dependencies
+# All other project dependencies (langchain-core ceiling in requirements.txt
+# acts as a second guard during this install)
 pip install --no-cache-dir -q -r requirements.txt
+
+# Install kagglehub AFTER all LangChain packages are locked so pip cannot
+# use kagglehub's transitive deps to break the ceiling.
+echo ""
+echo "=== [2b/7] Downloading BraTS Dataset ==="
+pip install -q kagglehub
+export DATA_DIR=$(python3 -c "import kagglehub; print(kagglehub.dataset_download('awsaf49/brats20-dataset-training-validation'))")
+echo "  ✓ Dataset downloaded to: $DATA_DIR"
 
 echo "  ✓ Python dependencies installed."
 

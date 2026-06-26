@@ -596,160 +596,173 @@ def _auto_init_dataset():
     st.session_state.pop("_dataset_init_error", None)
 
 
+def _detect_zip_format(uploaded_zip):
+    """Inspect a ZIP's contents and return 'nifti' or 'dicom'."""
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(uploaded_zip.getvalue()))
+        for name in zf.namelist():
+            low = name.lower()
+            if low.endswith(".nii") or low.endswith(".nii.gz"):
+                return "nifti"
+        return "dicom"
+    except Exception:
+        return "dicom"
+
+
+def _stage_nifti_zip(uploaded_zip, patient_id):
+    """Extract a NIfTI ZIP into a session folder laid out as a BraTS patient dir."""
+    normalized = _safe_token(patient_id)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    data_root = os.path.join(UPLOADS_DIR, f"session_{stamp}")
+    patient_root = os.path.join(data_root, normalized)
+    os.makedirs(patient_root, exist_ok=True)
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(uploaded_zip.getvalue()))
+        count = 0
+        for member in zf.namelist():
+            low = member.lower()
+            if low.endswith(".nii") or low.endswith(".nii.gz"):
+                blob = zf.read(member)
+                fname = os.path.basename(member) or f"file_{count}.nii.gz"
+                with open(os.path.join(patient_root, fname), "wb") as f:
+                    f.write(blob)
+                count += 1
+        if count == 0:
+            return None, None, "No NIfTI files found in ZIP."
+        return data_root, normalized, ""
+    except Exception as e:
+        return None, None, str(e)
+
+
 # ── Sidebar ──────────────────────────────────────────────────
-# Check running jobs on every page load
 check_running_jobs()
 
 with st.sidebar:
     st.markdown("## 🧠 Brain Tumor Analysis")
     st.markdown("---")
 
-    # Auto-load the BraTS dataset on first render (no Load button required).
-    _auto_init_dataset()
+    # ── Mode selector ─────────────────────────────────────────
+    mode = st.radio(
+        "Data source",
+        ["🧬 BraTS Dataset", "📤 Upload From System"],
+        key="data_mode",
+        label_visibility="collapsed",
+    )
+    st.markdown("---")
 
-    # ── Data source tabs ─────────────────────────────────────
-    brats_tab, dicom_tab, zip_tab = st.tabs(["🧬 BraTS", "🗂️ DICOM Dir", "📤 Upload ZIP"])
+    # ══════════════════════════════════════════════════════════
+    # MODE 1 — BraTS Dataset (auto-loaded on startup)
+    # ══════════════════════════════════════════════════════════
+    if mode == "🧬 BraTS Dataset":
+        _auto_init_dataset()
 
-    with brats_tab:
-        default_dir = os.environ.get("DATA_DIR", "").strip() or _KAGGLE_FALLBACK
-        active_brats_dir = st.session_state.get("brats_dir", "")
+        init_error = st.session_state.get("_dataset_init_error")
+        brats_dir = st.session_state.get("brats_dir", "")
 
-        # Show current auto-loaded path (read-only display).
-        if active_brats_dir and not st.session_state.get("_dataset_init_error"):
-            st.success(f"✅ Dataset loaded automatically")
-            st.caption(active_brats_dir)
-        elif st.session_state.get("_dataset_init_error"):
-            st.warning("⚠️ Auto-load failed — see below")
+        if brats_dir and not init_error:
+            st.success("✅ Dataset loaded")
+            st.caption(brats_dir)
+        elif init_error:
+            st.error("⚠️ Could not load dataset automatically")
+            st.caption(init_error)
+            st.markdown(
+                "**To fix:** ensure `DATA_DIR` is set before starting Streamlit, "
+                "or switch to **Upload From System**."
+            )
 
-        # Override text input: lets the user point to a different path.
-        brats_path = st.text_input(
-            "Override path (optional)",
-            value=st.session_state.get("brats_dir", default_dir),
-            key="brats_dir_widget",
-            help="Leave as-is to use the auto-detected path. Change and click Load to switch datasets.",
+        # Resolve active source from BraTS state
+        active_data_dir = st.session_state.get("uploaded_data_dir", "")
+        active_format = st.session_state.get("active_format", "nifti")
+        staged_pid_single = None  # not used in BraTS mode
+
+    # ══════════════════════════════════════════════════════════
+    # MODE 2 — Upload From System
+    # ══════════════════════════════════════════════════════════
+    else:
+        st.caption("Upload a patient folder as a ZIP. DICOM and NIfTI are both supported.")
+
+        upload_patient_id = st.text_input(
+            "Patient ID",
+            value=st.session_state.get("upload_pid_input", "uploaded_patient"),
+            key="upload_pid_input",
         )
-        col_a, col_b = st.columns(2)
-        with col_a:
-            if st.button("📂 Load", use_container_width=True, key="load_brats"):
-                if brats_path and os.path.isdir(brats_path):
-                    sub_dirs = [
-                        n for n in os.listdir(brats_path)
-                        if os.path.isdir(os.path.join(brats_path, n)) and not n.startswith(".")
-                    ]
-                    if sub_dirs:
-                        st.session_state["uploaded_data_dir"] = brats_path
-                        st.session_state["active_format"] = "nifti"
-                        st.session_state["brats_dir"] = brats_path
-                        st.session_state.pop("uploaded_patient_id", None)
-                        st.session_state.pop("_dataset_init_error", None)
-                        st.rerun()
-                    else:
-                        st.error("No patient sub-folders found. Expected folders like `BraTS20_Training_001`.")
-                else:
-                    st.error("Directory not found.")
-        with col_b:
-            if st.button("🔄 Reset", use_container_width=True, key="reset_brats"):
-                for k in ["uploaded_data_dir", "active_format", "brats_dir",
-                          "uploaded_patient_id", "_dataset_initialized", "_dataset_init_error"]:
-                    st.session_state.pop(k, None)
-                st.rerun()
-
-    with dicom_tab:
-        dicom_path = st.text_input(
-            "DICOM dataset path",
-            value=st.session_state.get("dicom_dir", ""),
-            key="dicom_dir_widget",
-            help="Folder containing patient sub-folders of .dcm files.",
-        )
-        col_c, col_d = st.columns(2)
-        with col_c:
-            if st.button("📂 Load", use_container_width=True, key="load_dicom"):
-                if dicom_path and os.path.isdir(dicom_path):
-                    sub_dirs = [
-                        n for n in os.listdir(dicom_path)
-                        if os.path.isdir(os.path.join(dicom_path, n)) and not n.startswith(".")
-                    ]
-                    if sub_dirs:
-                        st.session_state["uploaded_data_dir"] = dicom_path
-                        st.session_state["active_format"] = "dicom"
-                        st.session_state["dicom_dir"] = dicom_path
-                        st.session_state.pop("uploaded_patient_id", None)
-                        st.rerun()
-                    else:
-                        st.error("No patient sub-folders found.")
-                else:
-                    st.error("Directory not found.")
-        with col_d:
-            if st.button("🔄 Reset", use_container_width=True, key="reset_dicom"):
-                for k in ["uploaded_data_dir", "active_format", "dicom_dir", "uploaded_patient_id"]:
-                    st.session_state.pop(k, None)
-                st.rerun()
-
-    with zip_tab:
-        st.caption("Upload a single patient's DICOM folder as a ZIP file.")
-        upload_patient_id = st.text_input("Patient ID", value="uploaded_patient")
         uploaded_zip = st.file_uploader(
-            "Or upload patient folder as ZIP",
+            "Patient folder as ZIP",
             type=["zip"],
             accept_multiple_files=False,
-            help="Export or zip your local patient DICOM folder and upload it here.",
+            key="zip_uploader",
         )
-        if st.button("Stage ZIP Folder", use_container_width=True):
-            staged_dir, staged_pid, ok_count, bad_count, err = stage_dicom_zip(uploaded_zip, upload_patient_id)
-            if staged_dir and staged_pid:
-                st.session_state["uploaded_data_dir"] = staged_dir
-                st.session_state["uploaded_patient_id"] = staged_pid
-                st.session_state["active_format"] = "dicom"
-                st.success(f"Staged {ok_count} DICOM file(s) from ZIP for patient '{staged_pid}'.")
-                if bad_count:
-                    st.warning(f"Skipped {bad_count} non-DICOM or unreadable file(s).")
+
+        if uploaded_zip is not None:
+            # Auto-detect only when a new file is dropped (keyed by file name)
+            last_staged = st.session_state.get("_last_staged_zip", "")
+            if last_staged != uploaded_zip.name:
+                fmt = _detect_zip_format(uploaded_zip)
+                if fmt == "nifti":
+                    data_root, pid, err = _stage_nifti_zip(uploaded_zip, upload_patient_id)
+                    if data_root:
+                        st.session_state["upload_data_dir"] = data_root
+                        st.session_state["upload_format"] = "nifti"
+                        st.session_state["uploaded_patient_id"] = pid
+                        st.session_state["_last_staged_zip"] = uploaded_zip.name
+                        st.session_state.pop("_upload_error", None)
+                        st.rerun()
+                    else:
+                        st.session_state["_upload_error"] = err or "Failed to stage NIfTI ZIP."
+                else:
+                    staged_dir, staged_pid, ok_count, bad_count, err = stage_dicom_zip(
+                        uploaded_zip, upload_patient_id
+                    )
+                    if staged_dir:
+                        st.session_state["upload_data_dir"] = staged_dir
+                        st.session_state["upload_format"] = "dicom"
+                        st.session_state["uploaded_patient_id"] = staged_pid
+                        st.session_state["_last_staged_zip"] = uploaded_zip.name
+                        st.session_state.pop("_upload_error", None)
+                        if bad_count:
+                            st.warning(f"Skipped {bad_count} unreadable file(s).")
+                        st.rerun()
+                    else:
+                        st.session_state["_upload_error"] = err or "Failed to stage DICOM ZIP."
+
+        upload_err = st.session_state.get("_upload_error")
+        if upload_err:
+            st.error(upload_err)
+
+        staged = st.session_state.get("upload_data_dir", "")
+        staged_pid = st.session_state.get("uploaded_patient_id", "")
+        staged_fmt = st.session_state.get("upload_format", "dicom")
+        if staged and staged_pid:
+            st.success(f"✅ Staged: **{staged_pid}** ({staged_fmt.upper()})")
+            if st.button("🗑️ Clear Upload", use_container_width=True, key="clear_upload"):
+                for k in ["upload_data_dir", "upload_format", "uploaded_patient_id",
+                          "_last_staged_zip", "_upload_error"]:
+                    st.session_state.pop(k, None)
                 st.rerun()
-            else:
-                st.error(err or "Could not stage ZIP folder.")
 
-    # ── Resolve active data source ────────────────────────────
-    active_data_dir = st.session_state.get("uploaded_data_dir", "")
-    active_format   = st.session_state.get("active_format", "dicom")
-    staged_pid_single = st.session_state.get("uploaded_patient_id")
-    if staged_pid_single:
-        st.caption(f"Staged patient: {staged_pid_single}")
-    if active_data_dir:
-        st.caption(f"Dataset: {active_data_dir}")
+        # Resolve active source from upload state
+        active_data_dir = staged
+        active_format = staged_fmt
+        staged_pid_single = staged_pid or None
 
+    # ── Patient list (shared) ─────────────────────────────────
     all_patients = discover_all_patients(active_format, active_data_dir)
     if staged_pid_single and staged_pid_single not in all_patients:
         all_patients = sorted(set(all_patients + [staged_pid_single]))
     processed = find_processed_patients()
 
     if not all_patients:
-        init_error = st.session_state.get("_dataset_init_error")
-        if init_error:
-            st.error("⚠️ Could not load dataset automatically")
-            st.markdown(init_error)
+        if mode == "🧬 BraTS Dataset":
+            init_error = st.session_state.get("_dataset_init_error")
+            if not init_error:
+                st.warning("No patients found in the dataset directory.")
         else:
-            st.warning("No patients found. Load a dataset or upload a ZIP above.")
-            if active_data_dir:
-                st.code(f"Dataset dir: {os.path.abspath(active_data_dir)}")
-        st.markdown(
-            "**To fix:** set the `DATA_DIR` environment variable to your BraTS "
-            "dataset folder and restart Streamlit, or upload a patient ZIP in the "
-            "'Upload ZIP' tab above."
-        )
+            st.info("Upload a patient ZIP above to get started.")
         st.stop()
 
-    # ── Search ────────────────────────────────────────────────
-    search_term = st.text_input("🔍 Search patient", placeholder="Type to filter…", key="patient_search")
-    filtered_patients = (
-        [p for p in all_patients if search_term.lower() in p.lower()]
-        if search_term else all_patients
-    )
-    if not filtered_patients:
-        st.warning("No patients match the search.")
-        st.stop()
-
-    # Build display labels showing status
+    # Status-labelled dropdown — no search box
     labels = []
-    for pid in filtered_patients:
+    for pid in all_patients:
         job = get_job_status(pid)
         if pid in processed and job and job.get("status") == "completed_with_errors":
             labels.append(f"⚠️ {pid}")
@@ -766,8 +779,10 @@ with st.sidebar:
     patient_id = selected_label.split(" ", 1)[1].strip()
 
     running_count = sum(1 for j in get_all_jobs() if j.get("status") == "running")
-    st.caption(f"{len(processed)}/{len(all_patients)} processed" +
-               (f" · {running_count} running" if running_count else ""))
+    st.caption(
+        f"{len(processed)}/{len(all_patients)} processed"
+        + (f" · {running_count} running" if running_count else "")
+    )
     st.markdown("---")
 
     patient_processed = patient_id in processed
@@ -808,9 +823,8 @@ with st.sidebar:
                 else:
                     st.error("Failed to start pipeline.")
             else:
-                st.error("Load a dataset or stage a ZIP first.")
+                st.error("No dataset loaded.")
     else:
-        # Processed patient — show info and reprocess option
         report = load_report(patient_id)
         if report:
             meta = report.get("report_metadata", {})
@@ -829,7 +843,7 @@ with st.sidebar:
                 time.sleep(1)
                 st.rerun()
             else:
-                st.error("Cannot reprocess: staged data directory not available.")
+                st.error("Cannot reprocess: data directory not available.")
 
     st.markdown("---")
     st.markdown("### Navigation")

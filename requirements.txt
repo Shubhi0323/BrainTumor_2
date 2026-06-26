@@ -4,13 +4,16 @@ monai
 SimpleITK
 nibabel
 pyradiomics
-numpy
+numpy<2.0
 pandas
 scipy
 scikit-image
 pydicom
+# LangChain ecosystem — pinned as a group with a hard ceiling to prevent
+# any transitive dependency (mcp-cli, langgraph-sdk, etc.) from upgrading
+# langchain-core to the 1.x series, which breaks langchain 0.3.x.
 langchain==0.3.7
-langchain-core==0.3.15
+langchain-core>=0.3.43,<0.4
 langchain-community==0.3.7
 langchain-text-splitters==0.3.2
 langgraph==0.2.45
@@ -20,7 +23,7 @@ nilearn
 # Phase 2 — Agentic Intelligence
 transformers
 weaviate-client
-mcp[cli]
+mcp
 httpx
 ollama
 
