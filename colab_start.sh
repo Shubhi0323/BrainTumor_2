@@ -26,9 +26,15 @@
 # Do NOT use set -e — pip version conflicts would abort the script
 set +e
 
+# ── 0. DOWNLOAD DATASET ──────────────────────────────────────────────
+echo ""
+echo "=== [0/7] Downloading BraTS Dataset ==="
+pip install -q kagglehub
+export DATA_DIR=$(python3 -c "import kagglehub; print(kagglehub.dataset_download('awsaf49/brats20-dataset-training-validation'))")
+echo "  ✓ Dataset downloaded to: $DATA_DIR"
+
 # ── 1. PATHS ──────────────────────────────────────────────────────────
 REPO_DIR="/content/brain-tumor"
-DATA_DIR="${DATA_DIR:-/content/brats2020}"
 OUTPUT_DIR="$REPO_DIR/outputs"
 WEIGHTS_DIR="/content/dynunet_weights"
 
