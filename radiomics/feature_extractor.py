@@ -38,6 +38,11 @@ try:
     for _p in _shadow_paths:
         _sys.path.remove(_p)
 
+    # Critical: flush Python's internal finder cache (sys.path_importer_cache).
+    # Without this, Python remembers the local radiomics/ folder even after it
+    # is removed from sys.path and still loads it instead of pyradiomics.
+    _importlib.invalidate_caches()
+
     # Step 3 — Evict stale cached radiomics.* entries.
     for _k in list(_local_mods):
         _sys.modules.pop(_k, None)
