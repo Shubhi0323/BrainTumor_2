@@ -3,6 +3,11 @@ Radiomics Feature Extraction Node
 ===================================
 Uses PyRadiomics to extract shape, texture (GLCM), and intensity features
 from the tumor segmentation mask overlaid on the original MRI.
+
+NOTE: This module lives in radiomics_pipeline/ (not radiomics/) to avoid
+shadowing the installed pyradiomics library, which also imports as
+`import radiomics`. With the folder renamed, pyradiomics loads cleanly
+with zero import hacks.
 """
 import os
 import json
@@ -10,59 +15,9 @@ import numpy as np
 import SimpleITK as sitk
 
 try:
-    # The local radiomics/ package (this folder) shadows the installed
-    # pyradiomics library because both are imported as `import radiomics`.
-    # Strategy:
-    #   1. Snapshot all local radiomics.* sys.modules entries.
-    #   2. Temporarily remove sys.path entries that expose the local folder.
-    #   3. Evict stale radiomics.* entries so importlib finds pyradiomics.
-    #   4. Import pyradiomics — store a direct reference to featureextractor.
-    #   5. Restore sys.path AND the local radiomics.* sys.modules snapshot
-    #      so every other file that does `from radiomics.xxx import ...`
-    #      continues to resolve to the local package.
-    import sys as _sys
-    import os as _os
-    import importlib as _importlib
-
-    # Step 1 — Snapshot local radiomics package (may be None on first load).
-    _local_mods = {
-        k: v for k, v in _sys.modules.items()
-        if k == "radiomics" or k.startswith("radiomics.")
-    }
-
-    # Step 2 — Remove shadow paths (handle empty string '' which means cwd).
-    _shadow_paths = [
-        p for p in _sys.path
-        if _os.path.isdir(_os.path.join(p or ".", "radiomics"))
-    ]
-    for _p in _shadow_paths:
-        _sys.path.remove(_p)
-
-    # Critical: flush Python's internal finder cache (sys.path_importer_cache).
-    # Without this, Python remembers the local radiomics/ folder even after it
-    # is removed from sys.path and still loads it instead of pyradiomics.
-    _importlib.invalidate_caches()
-
-    # Step 3 — Evict stale cached radiomics.* entries.
-    for _k in list(_local_mods):
-        _sys.modules.pop(_k, None)
-
-    try:
-        # Step 4 — Import pyradiomics; keep direct module reference.
-        _importlib.import_module("radiomics")
-        featureextractor = _importlib.import_module("radiomics.featureextractor")
-        PYRADIOMICS_AVAILABLE = True
-    finally:
-        # Step 5 — Always restore sys.path and the local radiomics package.
-        for _p in _shadow_paths:
-            _sys.path.insert(0, _p)
-        # Put every local radiomics.* entry back so other files can still do
-        #   from radiomics.feature_extractor import extract_radiomics
-        # The featureextractor variable above already holds the pyradiomics
-        # module object directly, so it is unaffected by this restoration.
-        _sys.modules.update(_local_mods)
-
-except (ImportError, AttributeError, Exception):
+    from radiomics import featureextractor
+    PYRADIOMICS_AVAILABLE = True
+except (ImportError, Exception):
     PYRADIOMICS_AVAILABLE = False
 
 
